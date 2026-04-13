@@ -151,6 +151,31 @@ const { text } = await generateText({
 });
 ```
 
+## Using with OpenCode
+
+Add a custom provider to your `opencode.json`:
+
+```json
+{
+  "provider": {
+    "claude-local": {
+      "id": "claude-local",
+      "name": "Claude (Local Gateway)",
+      "api": "openai",
+      "baseURL": "http://localhost:3456/v1",
+      "apiKey": "not-needed",
+      "models": {
+        "claude-sonnet-4-6": { "name": "Claude Sonnet 4.6", "maxTokens": 128000 },
+        "claude-opus-4-6": { "name": "Claude Opus 4.6", "maxTokens": 128000 },
+        "claude-haiku-4-5": { "name": "Claude Haiku 4.5", "maxTokens": 64000 }
+      }
+    }
+  }
+}
+```
+
+Then select the model with `/model claude-local/claude-sonnet-4-6`.
+
 ## Tool name mapping
 
 If you send tools with custom names and Anthropic rejects them, add mappings in `TOOL_NAME_MAP` at the top of `src/index.ts`:
