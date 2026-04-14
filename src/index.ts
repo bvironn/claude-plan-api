@@ -1,7 +1,9 @@
+// index.ts
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { appendFileSync } from "node:fs";
 
 // --- Types ---
 
@@ -27,19 +29,47 @@ const VERSION = "2.1.90";
 const SALT = "59cf53e54c78";
 const MAX_RETRIES = 3;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+const LOG_PATH = Bun.env.LOG_PATH || "/var/log/claude-plan-api.log";
+
+// --- Anti-loop guard ---
+const MAX_CONSECUTIVE_TOOL_ERRORS = 2;
+const toolErrorCounters: Map<string, number> = new Map();
+
+function trackToolError(sessionId: string): boolean {
+  const count = (toolErrorCounters.get(sessionId) || 0) + 1;
+  toolErrorCounters.set(sessionId, count);
+  if (count >= MAX_CONSECUTIVE_TOOL_ERRORS) {
+    toolErrorCounters.delete(sessionId);
+    log("WARN", `[${sessionId}] Anti-loop: ${count} consecutive tool errors, aborting session`);
+    return true; // should abort
+  }
+  return false;
+}
+
+function resetToolErrorCounter(sessionId: string) {
+  toolErrorCounters.delete(sessionId);
+}
 
 const MODEL_MAP: Record<string, string> = {
+  // "claude-sonnet-4-6": "claude-sonnet-4-6",
+  // "claude-opus-4-6": "claude-opus-4-6",
+  // "claude-opus-4-5": "claude-opus-4-5-20251101",
+  // "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+  // "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+  // "claude-opus-4-1": "claude-opus-4-1-20250805",
+  // "claude-opus-4": "claude-opus-4-20250514",
+  // "claude-sonnet-4": "claude-sonnet-4-20250514",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
-  "claude-opus-4-6": "claude-opus-4-6",
-  "claude-opus-4-5": "claude-opus-4-5-20251101",
-  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
-  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
-  "claude-opus-4-1": "claude-opus-4-1-20250805",
-  "claude-opus-4": "claude-opus-4-20250514",
-  "claude-sonnet-4": "claude-sonnet-4-20250514",
+  "claude-opus-4-6": "claude-sonnet-4-6",
+  "claude-opus-4-5": "claude-sonnet-4-6",
+  "claude-haiku-4-5": "claude-sonnet-4-6",
+  "claude-sonnet-4-5": "claude-sonnet-4-6",
+  "claude-opus-4-1": "claude-sonnet-4-6",
+  "claude-opus-4": "claude-sonnet-4-6",
+  "claude-sonnet-4": "claude-sonnet-4-6",
   sonnet: "claude-sonnet-4-6",
-  opus: "claude-opus-4-6",
-  haiku: "claude-haiku-4-5-20251001",
+  opus: "claude-sonnet-4-6",
+  haiku: "claude-sonnet-4-6",
 };
 
 const MODELS_LIST = [
@@ -49,11 +79,12 @@ const MODELS_LIST = [
 ].map((id) => ({ id, object: "model" as const, owned_by: "anthropic" }));
 
 // Tool name mapping — Anthropic validates tool names match Claude Code's toolset for OAuth
-// Common tool names from OpenCode, OpenClaw, and other platforms mapped to Claude Code equivalents
+// Common tool names from OpenCode mapped to Claude Code equivalents
 const TOOL_NAME_MAP: Record<string, string> = {
   // OpenCode tools
   question: "AskUserQuestion",
   bash: "Bash",
+  exec: "CodeExec",
   read: "Read",
   glob: "Glob",
   grep: "Grep",
@@ -65,38 +96,7 @@ const TOOL_NAME_MAP: Record<string, string> = {
   skill: "Skill",
   delegate: "Agent",
   delegation_read: "View",
-  delegation_list: "TaskList",
-  // OpenClaw tools
-  exec: "Bash",
-  process: "Task",
-  apply_patch: "MultiEdit",
-  code_execution: "CodeExec",
-  web_search: "SearchAndReplace",
-  web_fetch: "WebFetch",
-  x_search: "BatchTool",
-  browser: "WebSearch",
-  canvas: "NotebookEdit",
-  image: "ImageRead",
-  pdf: "PdfRead",
-  nodes: "RemoteTrigger",
-  cron: "CronCreate",
-  message: "SendMessage",
-  tts: "AskUserQuestion",
-  gateway: "Skill",
-  agents_list: "Agent",
-  sessions_list: "TaskList",
-  sessions_history: "TaskGet",
-  sessions_send: "TaskCreate",
-  sessions_yield: "TaskUpdate",
-  sessions_spawn: "TaskOutput",
-  subagents: "TaskStop",
-  session_status: "Glob",
-  memory_search: "Grep",
-  memory_get: "View",
-  update_plan: "TodoWrite",
-  image_generate: "ImageGenerate",
-  music_generate: "MusicGenerate",
-  video_generate: "VideoGenerate",
+  delegation_list: "TaskList"
 };
 
 // Dynamic mapping for tools not in the static map — generates unique names per request
@@ -144,8 +144,6 @@ function mapToolNameFn(name: string): string {
 const TOOL_NAME_REVERSE = Object.fromEntries(
   Object.entries(TOOL_NAME_MAP).map(([k, v]) => [v, k])
 );
-
-
 
 // --- State ---
 
@@ -454,6 +452,38 @@ function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, mo
 
 async function handleChat(req: Request): Promise<Response> {
   const body = await req.json() as Record<string, unknown>;
+
+  // Anti-loop guard: use a session id derived from the request to track consecutive tool errors.
+  // If the incoming messages already contain N consecutive invalid tool results, abort early.
+  const messages = (body.messages as Array<Record<string, unknown>>) || [];
+  const sessionId = (messages[0]?.content as string)?.slice(0, 40) || `session-${Date.now()}`;
+
+  // Count trailing consecutive tool error results in the conversation history
+  let trailingErrors = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (
+      msg.role === "tool" &&
+      typeof msg.content === "string" &&
+      msg.content.includes("unavailable tool")
+    ) {
+      trailingErrors++;
+    } else {
+      break;
+    }
+  }
+
+  if (trailingErrors >= MAX_CONSECUTIVE_TOOL_ERRORS) {
+    log("WARN", `[${sessionId}] Anti-loop: ${trailingErrors} consecutive tool errors detected in history, aborting`);
+    return Response.json({
+      error: {
+        message: `Loop detectado: ${trailingErrors} errores consecutivos de tool inválida. Revisá el mapeo de tools en el proxy.`,
+        type: "proxy_error",
+        code: 400,
+      }
+    }, { status: 400 });
+  }
+
   await ensureValidToken();
 
   const anthropicBody = openaiToAnthropic(body);
@@ -471,13 +501,17 @@ async function handleChat(req: Request): Promise<Response> {
     });
 
     if (res.ok) {
+      resetToolErrorCounter(sessionId);
+      log("REQUEST", `model=${model} messages=${messages.length} tools=${((anthropicBody.tools as unknown[]) || []).length} stream=${isStream} status=200`);
       if (isStream) {
         return new Response(streamAnthropicToOpenai(res.body!, model), {
           headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
         });
       }
       const data = await res.json() as Record<string, unknown>;
-      return Response.json(anthropicToOpenai(data, body.model as string || "claude-sonnet-4-6"));
+      const usage = (data.usage as Record<string, number>) || {};
+      log("USAGE", `input_tokens=${usage.input_tokens || 0} output_tokens=${usage.output_tokens || 0}`);
+      return Response.json(anthropicToOpenai(data, model));
     }
 
     const errorBody = await res.text();
@@ -505,7 +539,13 @@ async function handleChat(req: Request): Promise<Response> {
 // --- Utils ---
 
 function log(level: string, msg: string) {
-  console.log(`[${new Date().toISOString()}] [${level}] ${msg}`);
+  const line = `[${new Date().toISOString()}] [${level}] ${msg}\n`;
+  process.stdout.write(line);
+  try {
+    appendFileSync(LOG_PATH, line);
+  } catch (e) {
+    process.stdout.write(`[WARN] No se pudo escribir en ${LOG_PATH}: ${(e as Error).message}\n`);
+  }
 }
 
 // --- Server ---
