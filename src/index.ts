@@ -4,22 +4,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { appendFileSync } from "node:fs";
-
 // --- Types ---
-
 interface Credentials {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
 }
-
 interface AnthropicMessage {
   role: string;
   content: string | Array<Record<string, unknown>>;
 }
-
 // --- Config ---
-
 const PORT = parseInt(process.argv[2] || Bun.env.PORT || "3456", 10);
 const CREDENTIALS_PATH = Bun.env.CREDENTIALS_PATH || join(homedir(), ".claude", ".credentials.json");
 const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
@@ -30,58 +25,54 @@ const SALT = "59cf53e54c78";
 const MAX_RETRIES = 3;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const LOG_PATH = Bun.env.LOG_PATH || "/var/log/claude-plan-api.log";
-
 // --- Anti-loop guard ---
 const MAX_CONSECUTIVE_TOOL_ERRORS = 2;
 const toolErrorCounters: Map<string, number> = new Map();
-
 function trackToolError(sessionId: string): boolean {
   const count = (toolErrorCounters.get(sessionId) || 0) + 1;
   toolErrorCounters.set(sessionId, count);
   if (count >= MAX_CONSECUTIVE_TOOL_ERRORS) {
     toolErrorCounters.delete(sessionId);
     log("WARN", `[${sessionId}] Anti-loop: ${count} consecutive tool errors, aborting session`);
-    return true; // should abort
+    return true;
   }
   return false;
 }
-
 function resetToolErrorCounter(sessionId: string) {
   toolErrorCounters.delete(sessionId);
 }
-
 const MODEL_MAP: Record<string, string> = {
-  // "claude-sonnet-4-6": "claude-sonnet-4-6",
-  // "claude-opus-4-6": "claude-opus-4-6",
-  // "claude-opus-4-5": "claude-opus-4-5-20251101",
-  // "claude-haiku-4-5": "claude-haiku-4-5-20251001",
-  // "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
-  // "claude-opus-4-1": "claude-opus-4-1-20250805",
-  // "claude-opus-4": "claude-opus-4-20250514",
-  // "claude-sonnet-4": "claude-sonnet-4-20250514",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
-  "claude-opus-4-6": "claude-sonnet-4-6",
-  "claude-opus-4-5": "claude-sonnet-4-6",
-  "claude-haiku-4-5": "claude-sonnet-4-6",
-  "claude-sonnet-4-5": "claude-sonnet-4-6",
-  "claude-opus-4-1": "claude-sonnet-4-6",
-  "claude-opus-4": "claude-sonnet-4-6",
-  "claude-sonnet-4": "claude-sonnet-4-6",
+  "claude-opus-4-6": "claude-opus-4-6",
+  "claude-opus-4-5": "claude-opus-4-5-20251101",
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+  "claude-opus-4-1": "claude-opus-4-1-20250805",
+  "claude-opus-4": "claude-opus-4-20250514",
+  "claude-sonnet-4": "claude-sonnet-4-20250514",
+  "claude-opus-4-5-20251101": "claude-opus-4-5-20251101",
+  "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+  "claude-sonnet-4-5-20250929": "claude-sonnet-4-5-20250929",
+  "claude-opus-4-1-20250805": "claude-opus-4-1-20250805",
+  "claude-opus-4-20250514": "claude-opus-4-20250514",
+  "claude-sonnet-4-20250514": "claude-sonnet-4-20250514",
+  "claude-3-haiku-20240307": "claude-3-haiku-20240307",
   sonnet: "claude-sonnet-4-6",
-  opus: "claude-sonnet-4-6",
-  haiku: "claude-sonnet-4-6",
+  opus: "claude-opus-4-6",
+  haiku: "claude-haiku-4-5-20251001",
 };
-
 const MODELS_LIST = [
-  "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5",
-  "claude-opus-4-5", "claude-haiku-4-5", "claude-opus-4-1",
-  "claude-opus-4", "claude-sonnet-4",
+  "claude-sonnet-4-6",
+  "claude-opus-4-6",
+  "claude-opus-4-5-20251101",
+  "claude-haiku-4-5-20251001",
+  "claude-sonnet-4-5-20250929",
+  "claude-opus-4-1-20250805",
+  "claude-opus-4-20250514",
+  "claude-sonnet-4-20250514",
+  "claude-3-haiku-20240307",
 ].map((id) => ({ id, object: "model" as const, owned_by: "anthropic" }));
-
-// Tool name mapping — Anthropic validates tool names match Claude Code's toolset for OAuth
-// Common tool names from OpenCode mapped to Claude Code equivalents
 const TOOL_NAME_MAP: Record<string, string> = {
-  // OpenCode tools
   question: "AskUserQuestion",
   bash: "Bash",
   exec: "CodeExec",
@@ -96,68 +87,51 @@ const TOOL_NAME_MAP: Record<string, string> = {
   skill: "Skill",
   delegate: "Agent",
   delegation_read: "View",
-  delegation_list: "TaskList"
+  delegation_list: "TaskList",
 };
-
-// Dynamic mapping for tools not in the static map — generates unique names per request
 let dynamicToolMap: Record<string, string> = {};
 let dynamicToolReverse: Record<string, string> = {};
-let dynamicCounter = 0;
-
-// Claude Code tool names we can use as bases for dynamic naming
-const CC_TOOL_POOL = [
-  "Grep", "View", "BatchTool", "SearchAndReplace", "CodeExec",
-  "ImageRead", "PdfRead", "RemoteTrigger", "CronCreate", "MusicGenerate",
-  "VideoGenerate", "ImageGenerate", "MultiEdit", "TaskGet", "TaskCreate",
-  "TaskUpdate", "TaskOutput", "TaskStop", "NotebookEdit",
-];
-
-let usedNames: Set<string> = new Set();
-
 function resetDynamicMap() {
   dynamicToolMap = {};
   dynamicToolReverse = {};
-  dynamicCounter = 0;
-  usedNames = new Set(Object.values(TOOL_NAME_MAP));
 }
-
+function sanitizeToolName(name: string): string {
+  // Anthropic tool names: [a-zA-Z0-9_], max 64 chars, must start with a letter
+  let s = name.replace(/[^a-zA-Z0-9_]/g, "_");
+  if (/^[0-9]/.test(s)) s = "T" + s;
+  return s.slice(0, 64);
+}
 function mapToolNameFn(name: string): string {
-  if (TOOL_NAME_MAP[name]) {
-    usedNames.add(TOOL_NAME_MAP[name]);
-    return TOOL_NAME_MAP[name];
-  }
+  if (TOOL_NAME_MAP[name]) return TOOL_NAME_MAP[name];
   if (dynamicToolMap[name]) return dynamicToolMap[name];
-  // Generate a unique name that doesn't collide with any already used
-  let mapped: string;
-  do {
-    const base = CC_TOOL_POOL[dynamicCounter % CC_TOOL_POOL.length];
-    const round = Math.floor(dynamicCounter / CC_TOOL_POOL.length);
-    mapped = round === 0 ? base : `${base}_${round}`;
-    dynamicCounter++;
-  } while (usedNames.has(mapped));
-  usedNames.add(mapped);
+  // Derive mapped name deterministically from the original name
+  const sanitized = sanitizeToolName(name);
+  // Collision check: two different originals with same sanitized name
+  const usedSanitized = new Set([
+    ...Object.values(TOOL_NAME_MAP),
+    ...Object.values(dynamicToolMap),
+  ]);
+  let mapped = sanitized;
+  let suffix = 2;
+  while (usedSanitized.has(mapped)) {
+    mapped = `${sanitized}_${suffix++}`;
+  }
   dynamicToolMap[name] = mapped;
   dynamicToolReverse[mapped] = name;
   return mapped;
 }
-
 const TOOL_NAME_REVERSE = Object.fromEntries(
   Object.entries(TOOL_NAME_MAP).map(([k, v]) => [v, k])
 );
-
 // --- State ---
-
 let credentials: Credentials | null = null;
 let refreshPromise: Promise<void> | null = null;
-
 // --- Credentials ---
-
 function readCredentials(): Credentials {
   const raw = JSON.parse(readFileSync(CREDENTIALS_PATH, "utf8"));
   credentials = raw.claudeAiOauth;
   return credentials!;
 }
-
 function writeCredentials(accessToken: string, refreshToken: string, expiresIn: number) {
   const raw = JSON.parse(readFileSync(CREDENTIALS_PATH, "utf8"));
   raw.claudeAiOauth.accessToken = accessToken;
@@ -166,7 +140,6 @@ function writeCredentials(accessToken: string, refreshToken: string, expiresIn: 
   writeFileSync(CREDENTIALS_PATH, JSON.stringify(raw, null, 2));
   credentials = raw.claudeAiOauth;
 }
-
 async function refreshToken(): Promise<void> {
   if (refreshPromise) return refreshPromise;
   refreshPromise = (async () => {
@@ -190,7 +163,6 @@ async function refreshToken(): Promise<void> {
   })().finally(() => { refreshPromise = null; });
   return refreshPromise;
 }
-
 async function ensureValidToken() {
   readCredentials();
   if (Date.now() > credentials!.expiresAt - REFRESH_MARGIN_MS) {
@@ -198,9 +170,7 @@ async function ensureValidToken() {
     await refreshToken();
   }
 }
-
 // --- Billing ---
-
 function computeBilling(firstUserMessage: string): string {
   const msg = firstUserMessage || "";
   const cch = createHash("sha256").update(msg).digest("hex").slice(0, 5);
@@ -208,9 +178,7 @@ function computeBilling(firstUserMessage: string): string {
   const suffix = createHash("sha256").update(`${SALT}${sampled}${VERSION}`).digest("hex").slice(0, 3);
   return `x-anthropic-billing-header: cc_version=${VERSION}.${suffix}; cc_entrypoint=cli; cch=${cch};`;
 }
-
 // --- Headers ---
-
 function buildBetas(model: string): string {
   const parts = [
     "claude-code-20250219",
@@ -226,7 +194,6 @@ function buildBetas(model: string): string {
   if (model.includes("4-6")) parts.push("effort-2025-11-24");
   return parts.join(",");
 }
-
 function buildHeaders(model: string): Record<string, string> {
   return {
     authorization: `Bearer ${credentials!.accessToken}`,
@@ -237,27 +204,21 @@ function buildHeaders(model: string): Record<string, string> {
     "content-type": "application/json",
   };
 }
-
 // --- Format Conversion ---
-
 function resolveModel(input: string): string {
   return MODEL_MAP[input] || MODEL_MAP[input.replace(/^(openai|claude-local)\//, "")] || MODEL_MAP["sonnet"];
 }
-
 function mapToolName(name: string): string {
   return mapToolNameFn(name);
 }
-
 function unmapToolName(name: string): string {
   return TOOL_NAME_REVERSE[name] || dynamicToolReverse[name] || name;
 }
-
 function openaiToAnthropic(body: Record<string, unknown>) {
   resetDynamicMap();
   const model = resolveModel(body.model as string || "sonnet");
   const messages: AnthropicMessage[] = [];
   let systemPrompt: string | null = null;
-
   for (const msg of (body.messages as Array<Record<string, unknown>>) || []) {
     if (msg.role === "system") {
       const text = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
@@ -289,32 +250,17 @@ function openaiToAnthropic(body: Record<string, unknown>) {
       messages.push({ role: msg.role as string, content: msg.content as string });
     }
   }
-
-  // Clean batch markers
   for (const msg of messages) delete (msg as Record<string, unknown>)._batch;
-
-  // Billing from first user message
   const firstUser = messages.find((m) => m.role === "user");
   const firstText = typeof firstUser?.content === "string"
     ? firstUser.content
     : Array.isArray(firstUser?.content)
       ? (firstUser!.content as Array<Record<string, unknown>>).find((c) => c.type === "text")?.text as string || ""
       : "";
-
-  const system: Array<Record<string, string>> = [{ type: "text", text: computeBilling(firstText) }];
-
-  // System prompt goes as first user message instead of system[] to avoid platform detection
+  const system: Array<Record<string, unknown>> = [{ type: "text", text: computeBilling(firstText) }];
   if (systemPrompt) {
-    const firstUserIdx = messages.findIndex((m) => m.role === "user");
-    if (firstUserIdx !== -1) {
-      const original = messages[firstUserIdx].content;
-      const originalText = typeof original === "string" ? original : JSON.stringify(original);
-      messages[firstUserIdx] = { role: "user", content: `${systemPrompt}\n\n---\n\n${originalText}` };
-    } else {
-      messages.unshift({ role: "user", content: systemPrompt });
-    }
+    system.push({ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } });
   }
-
   const result: Record<string, unknown> = {
     model,
     max_tokens: (body.max_tokens as number) || 4096,
@@ -322,7 +268,6 @@ function openaiToAnthropic(body: Record<string, unknown>) {
     system,
     messages,
   };
-
   if (body.tools && (body.tools as unknown[]).length > 0) {
     result.tools = (body.tools as Array<Record<string, unknown>>).map((t) => {
       const fn = t.function as Record<string, unknown>;
@@ -333,18 +278,14 @@ function openaiToAnthropic(body: Record<string, unknown>) {
       };
     });
   }
-
   return result;
 }
-
 function anthropicToOpenai(res: Record<string, unknown>, model: string) {
   const content = (res.content as Array<Record<string, unknown>>) || [];
   const textBlock = content.find((c) => c.type === "text");
   const toolBlocks = content.filter((c) => c.type === "tool_use");
-
   const stopMap: Record<string, string> = { end_turn: "stop", max_tokens: "length", stop_sequence: "stop", tool_use: "tool_calls" };
   const message: Record<string, unknown> = { role: "assistant", content: (textBlock?.text as string) || null };
-
   if (toolBlocks.length > 0) {
     message.tool_calls = toolBlocks.map((tu) => ({
       id: tu.id,
@@ -352,7 +293,6 @@ function anthropicToOpenai(res: Record<string, unknown>, model: string) {
       function: { name: unmapToolName(tu.name as string), arguments: JSON.stringify(tu.input) },
     }));
   }
-
   const usage = res.usage as Record<string, number> || {};
   return {
     id: res.id || `chatcmpl-${Date.now()}`,
@@ -367,23 +307,77 @@ function anthropicToOpenai(res: Record<string, unknown>, model: string) {
     },
   };
 }
-
+// --- Logging helpers ---
+function logRequest(anthropicBody: Record<string, unknown>, model: string, isStream: boolean) {
+  const messages = anthropicBody.messages as Array<Record<string, unknown>>;
+  const tools = (anthropicBody.tools as Array<Record<string, unknown>>) || [];
+  const system = anthropicBody.system as Array<Record<string, unknown>>;
+  const lines: string[] = [];
+  lines.push(`REQUEST model=${model} messages=${messages.length} tools=${tools.length} stream=${isStream}`);
+  lines.push(`system_blocks=${system.length} max_tokens=${anthropicBody.max_tokens}`);
+  if (tools.length > 0) {
+    lines.push(`tools: ${tools.map((t) => t.name).join(", ")}`);
+  }
+  lines.push("messages:");
+  for (const m of messages) {
+    if (Array.isArray(m.content)) {
+      const parts = m.content as Array<Record<string, unknown>>;
+      for (const p of parts) {
+        if (p.type === "tool_use") {
+          let args = "";
+          try { args = JSON.stringify(p.input, null, 2).replace(/\n/g, "\n"); } catch {}
+          lines.push(`[${m.role}] tool_use → ${p.name}`);
+          lines.push(`${args}`);
+        } else if (p.type === "tool_result") {
+          const content = String(p.content || "").slice(0, 300);
+          lines.push(`[tool_result id=${p.tool_use_id}] ${content}${String(p.content || "").length > 300 ? "…" : ""}`);
+        } else if (p.type === "text") {
+          const text = String(p.text || "").slice(0, 300);
+          lines.push(`[${m.role}] ${text}${String(p.text || "").length > 300 ? "…" : ""}`);
+        }
+      }
+    } else {
+      const text = String(m.content || "").slice(0, 300);
+      lines.push(`[${m.role}] ${text}${String(m.content || "").length > 300 ? "…" : ""}`);
+    }
+  }
+  log("REQUEST", lines.join("\n"));
+}
+function logResponse(model: string, stopReason: string, text: string, tools: Array<{ name: string; arguments: string }>, usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }) {
+  const lines: string[] = [];
+  lines.push(`RESPONSE model=${model} stop=${stopReason}`);
+  if (text) {
+    const preview = text.length > 500 ? text.slice(0, 500) + "…" : text;
+    lines.push(`text: ${preview.replace(/\n/g, "\n")}`);
+  }
+  for (const tool of tools) {
+    let args = tool.arguments;
+    try { args = JSON.stringify(JSON.parse(tool.arguments), null, 2).replace(/\n/g, "\n"); } catch {}
+    lines.push(`tool_call: ${tool.name}`);
+    lines.push(`args: ${args}`);
+  }
+  const cacheHit = usage.cache_read_input_tokens > 0 ? ` [CACHE HIT: ${usage.cache_read_input_tokens} tokens saved]` : "";
+  const cacheWrite = usage.cache_creation_input_tokens > 0 ? ` [CACHE WRITE: ${usage.cache_creation_input_tokens}]` : "";
+  lines.push(`USAGE input=${usage.input_tokens} output=${usage.output_tokens} cache_read=${usage.cache_read_input_tokens} cache_write=${usage.cache_creation_input_tokens} total=${usage.input_tokens + usage.output_tokens}${cacheHit}${cacheWrite}`);
+  log("RESPONSE", lines.join("\n"));
+}
 // --- Streaming ---
-
 function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string): ReadableStream {
   const decoder = new TextDecoder();
   let buffer = "";
   let msgId = `chatcmpl-${Date.now()}`;
-  let usage = { input_tokens: 0, output_tokens: 0 };
+  let usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   let toolIndex = -1;
   let sentRole = false;
-
+  let stopReason = "end_turn";
+  // Accumulate full response for logging
+  let responseText = "";
+  const responseTools: Array<{ name: string; arguments: string }> = [];
+  let currentToolArgs = "";
   const stopMap: Record<string, string> = { end_turn: "stop", max_tokens: "length", stop_sequence: "stop", tool_use: "tool_calls" };
-
   function chunk(data: Record<string, unknown>): string {
     return `data: ${JSON.stringify(data)}\n\n`;
   }
-
   return new ReadableStream({
     async start(controller) {
       const reader = anthropicStream.getReader();
@@ -391,25 +385,27 @@ function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, mo
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop()!;
-
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
             const json = line.slice(6).trim();
             if (!json || json === "[DONE]") continue;
-
             try {
               const event = JSON.parse(json);
-
               if (event.type === "message_start") {
                 if (event.message?.id) msgId = event.message.id;
-                if (event.message?.usage) usage.input_tokens = event.message.usage.input_tokens || 0;
+                if (event.message?.usage) {
+                  usage.input_tokens = event.message.usage.input_tokens || 0;
+                  usage.cache_read_input_tokens = event.message.usage.cache_read_input_tokens || 0;
+                  usage.cache_creation_input_tokens = event.message.usage.cache_creation_input_tokens || 0;
+                }
               } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
                 toolIndex++;
+                currentToolArgs = "";
                 const name = unmapToolName(event.content_block.name);
+                responseTools.push({ name, arguments: "" });
                 controller.enqueue(chunk({
                   id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                   choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: event.content_block.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
@@ -417,11 +413,14 @@ function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, mo
                 sentRole = true;
               } else if (event.type === "content_block_delta") {
                 if (event.delta?.type === "input_json_delta" && event.delta.partial_json) {
+                  currentToolArgs += event.delta.partial_json;
+                  if (responseTools[toolIndex]) responseTools[toolIndex].arguments = currentToolArgs;
                   controller.enqueue(chunk({
                     id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                     choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, function: { arguments: event.delta.partial_json } }] }, finish_reason: null }],
                   }));
                 } else if (event.delta?.text) {
+                  responseText += event.delta.text;
                   controller.enqueue(chunk({
                     id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                     choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), content: event.delta.text }, finish_reason: null }],
@@ -430,11 +429,14 @@ function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, mo
                 }
               } else if (event.type === "message_delta") {
                 if (event.usage) usage.output_tokens = event.usage.output_tokens || 0;
+                if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
                 controller.enqueue(chunk({
                   id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                   choices: [{ index: 0, delta: {}, finish_reason: stopMap[event.delta?.stop_reason] || "stop" }],
                   usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens, total_tokens: usage.input_tokens + usage.output_tokens },
                 }));
+              } else if (event.type === "message_stop") {
+                logResponse(model, stopReason, responseText, responseTools, usage);
               }
             } catch {}
           }
@@ -447,32 +449,20 @@ function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, mo
     },
   });
 }
-
 // --- Request Handler ---
-
 async function handleChat(req: Request): Promise<Response> {
   const body = await req.json() as Record<string, unknown>;
-
-  // Anti-loop guard: use a session id derived from the request to track consecutive tool errors.
-  // If the incoming messages already contain N consecutive invalid tool results, abort early.
   const messages = (body.messages as Array<Record<string, unknown>>) || [];
   const sessionId = (messages[0]?.content as string)?.slice(0, 40) || `session-${Date.now()}`;
-
-  // Count trailing consecutive tool error results in the conversation history
   let trailingErrors = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (
-      msg.role === "tool" &&
-      typeof msg.content === "string" &&
-      msg.content.includes("unavailable tool")
-    ) {
+    if (msg.role === "tool" && typeof msg.content === "string" && msg.content.includes("unavailable tool")) {
       trailingErrors++;
     } else {
       break;
     }
   }
-
   if (trailingErrors >= MAX_CONSECUTIVE_TOOL_ERRORS) {
     log("WARN", `[${sessionId}] Anti-loop: ${trailingErrors} consecutive tool errors detected in history, aborting`);
     return Response.json({
@@ -483,26 +473,20 @@ async function handleChat(req: Request): Promise<Response> {
       }
     }, { status: 400 });
   }
-
   await ensureValidToken();
-
   const anthropicBody = openaiToAnthropic(body);
   const model = anthropicBody.model as string;
   const isStream = anthropicBody.stream as boolean;
   const headers = buildHeaders(model);
-
-  log("INFO", `model=${model} messages=${(anthropicBody.messages as unknown[]).length} tools=${((anthropicBody.tools as unknown[]) || []).length} stream=${isStream}`);
-
+  logRequest(anthropicBody, model, isStream);
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const res = await fetch(ANTHROPIC_API, {
       method: "POST",
-      headers: { ...headers, ...(isStream ? {} : {}) },
+      headers,
       body: JSON.stringify(anthropicBody),
     });
-
     if (res.ok) {
       resetToolErrorCounter(sessionId);
-      log("REQUEST", `model=${model} messages=${messages.length} tools=${((anthropicBody.tools as unknown[]) || []).length} stream=${isStream} status=200`);
       if (isStream) {
         return new Response(streamAnthropicToOpenai(res.body!, model), {
           headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
@@ -510,62 +494,101 @@ async function handleChat(req: Request): Promise<Response> {
       }
       const data = await res.json() as Record<string, unknown>;
       const usage = (data.usage as Record<string, number>) || {};
-      log("USAGE", `input_tokens=${usage.input_tokens || 0} output_tokens=${usage.output_tokens || 0}`);
+      const content = (data.content as Array<Record<string, unknown>>) || [];
+      const textBlock = content.find((c) => c.type === "text");
+      const toolBlocks = content.filter((c) => c.type === "tool_use");
+      logResponse(
+        model,
+        String(data.stop_reason || "end_turn"),
+        String(textBlock?.text || ""),
+        toolBlocks.map((tu) => ({ name: unmapToolName(tu.name as string), arguments: JSON.stringify(tu.input) })),
+        {
+          input_tokens: usage.input_tokens || 0,
+          output_tokens: usage.output_tokens || 0,
+          cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+          cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+        }
+      );
       return Response.json(anthropicToOpenai(data, model));
     }
-
     const errorBody = await res.text();
-
     if (res.status === 401 && attempt === 0) {
       log("WARN", "401 — refreshing token");
       await refreshToken();
       continue;
     }
-
     if ((res.status === 429 || res.status === 529) && attempt < MAX_RETRIES) {
       const wait = parseInt(res.headers.get("retry-after") || "") || 2 ** attempt;
       log("WARN", `${res.status} — retry in ${wait}s`);
       await Bun.sleep(wait * 1000);
       continue;
     }
-
     log("ERROR", `Anthropic ${res.status}: ${errorBody}`);
     return Response.json({ error: { message: errorBody, type: "error", code: res.status } }, { status: res.status });
   }
-
   return Response.json({ error: { message: "Max retries exceeded", type: "error", code: 502 } }, { status: 502 });
 }
-
 // --- Utils ---
 
+// SSE subscribers for /logs endpoint
+const logSubscribers: Set<(data: string) => void> = new Set();
+
 function log(level: string, msg: string) {
-  const line = `[${new Date().toISOString()}] [${level}] ${msg}\n`;
+  const ts = new Date().toISOString();
+  const line = `[${ts}] [${level}] ${msg}\n`;
   process.stdout.write(line);
   try {
     appendFileSync(LOG_PATH, line);
   } catch (e) {
     process.stdout.write(`[WARN] No se pudo escribir en ${LOG_PATH}: ${(e as Error).message}\n`);
   }
+  const sseData = `data: ${JSON.stringify({ ts, level, msg })}\n\n`;
+  for (const emit of logSubscribers) {
+    try { emit(sseData); } catch {}
+  }
 }
-
 // --- Server ---
-
 readCredentials();
 log("INFO", `Credentials loaded. Expires ${new Date(credentials!.expiresAt).toISOString()}`);
-
 const server = Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
   async fetch(req) {
     const url = new URL(req.url);
     const { method, pathname } = { method: req.method, pathname: url.pathname };
-
-    // CORS
     if (method === "OPTIONS") return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" } });
-
     try {
       if (method === "GET" && pathname === "/health") return Response.json({ status: "ok" });
       if (method === "GET" && pathname === "/v1/models") return Response.json({ object: "list", data: MODELS_LIST });
+      if (method === "GET" && pathname === "/logs") {
+        let emitFn: (data: string) => void;
+        const stream = new ReadableStream({
+          start(controller) {
+            emitFn = (data: string) => controller.enqueue(new TextEncoder().encode(data));
+            logSubscribers.add(emitFn);
+            try {
+              const content = readFileSync(LOG_PATH, "utf8");
+              const lines = content.trim().split("\n").slice(-100);
+              for (const rawLine of lines) {
+                const match = rawLine.match(/^\[(.+?)\] \[(.+?)\] ([\s\S]*)$/);
+                if (match) {
+                  const entry = { ts: match[1], level: match[2], msg: match[3] };
+                  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(entry)}\n\n`));
+                }
+              }
+            } catch {}
+          },
+          cancel() { logSubscribers.delete(emitFn); },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      }
       if (method === "POST" && pathname === "/v1/chat/completions") return await handleChat(req);
       return Response.json({ error: { message: `Not found: ${method} ${pathname}` } }, { status: 404 });
     } catch (err) {
@@ -574,9 +597,6 @@ const server = Bun.serve({
     }
   },
 });
-
 log("INFO", `claude-plan-api listening on http://127.0.0.1:${server.port}`);
 log("INFO", `POST http://127.0.0.1:${server.port}/v1/chat/completions`);
-
-// Proactive refresh
 setInterval(() => ensureValidToken().catch((e) => log("ERROR", `Refresh: ${e.message}`)), 60_000);
