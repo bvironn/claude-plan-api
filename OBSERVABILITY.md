@@ -2,7 +2,9 @@
 
 ## Overview
 
-Every HTTP request flows through the full observability pipeline:
+Most backend requests flow through the full observability pipeline.
+
+Note: telemetry endpoints under `/api/telemetry*` are intentionally excluded from middleware tracing to avoid self-observation loops.
 
 ```
 HTTP Request
@@ -144,6 +146,10 @@ In-memory pub/sub for real-time SSE delivery. A `Set<Subscriber>` holds callback
 7. On success: emits `http.request.end`, calls `updateRequest()` with status + duration
 8. On error: emits `http.request.error`, updates record with status=500, re-throws
 9. Adds `x-trace-id` header to the final response
+
+Important behavior:
+
+- Requests whose path starts with `/api/telemetry` bypass this middleware (`SILENT_PATH_PREFIXES`), so they do not generate `http.request.*` events.
 
 #### `src/observability/globals.ts`
 
@@ -396,7 +402,7 @@ Note: `capture()` is a no-op in SSR (`typeof window === "undefined"` guard), so 
 | GET | `/health` | Returns `{ status: "ok" }` |
 | GET | `/v1/models` | List available Claude models |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat proxy |
-| POST | `/api/telemetry` | Ingest frontend events (batch, max 500) |
+| POST | `/api/telemetry` | Ingest frontend events (batch, max 500; middleware-silent path) |
 | GET | `/api/telemetry/logs` | Query events with filters |
 | GET | `/api/telemetry/stream` | SSE stream of live events |
 | GET | `/api/telemetry/metrics` | Aggregated metrics for a time window |

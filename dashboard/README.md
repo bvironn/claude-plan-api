@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# dashboard
 
-## Getting Started
+Telemetry dashboard for `claude-plan-api`.
 
-First, run the development server:
+This app visualizes backend telemetry with tabs for:
+
+- Overview (metrics + charts)
+- Logs
+- Requests
+- Sessions
+- Live SSE stream
+
+## Run Locally
+
+From `dashboard/`:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+bun install
+bun run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Backend Dependency
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The dashboard expects the backend API to be running (default `http://127.0.0.1:3456`).
 
-## Learn More
+Start backend from repo root:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+bun run src/index.ts
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Proxy and Env
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `BACKEND_URL` (server-side): target backend URL used by proxy route
+- `NEXT_PUBLIC_API_URL` (optional): direct API URL override
 
-## Deploy on Vercel
+Proxy route:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `src/app/api/proxy/[...path]/route.ts`
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Main UI Routes
+
+- `/observability` (default landing)
+- `/observability/request/[traceId]` (deep-link request details)
+
+Root route `/` redirects to `/observability`.
+
+## Telemetry Client Modules
+
+- `src/lib/telemetry/capture.ts`: browser event capture
+- `src/lib/telemetry/buffer.ts`: IndexedDB queue and batch flush
+- `src/lib/telemetry/client.ts`: API queries for logs/requests/metrics
+- `src/lib/telemetry/sse.ts`: live stream handling
+
+## Notes
+
+- Internal telemetry flush requests are tagged to avoid self-capture loops.
+- UI polling refreshes key metrics every 10 seconds.
