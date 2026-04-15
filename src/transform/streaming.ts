@@ -21,12 +21,26 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   // Capture trace at stream creation time (AsyncLocalStorage context)
   const traceAtStart = currentTrace();
 
+  let closed = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  const safeEnqueue = (controller: ReadableStreamDefaultController, data: string): boolean => {
+    if (closed) return false;
+    try {
+      controller.enqueue(data);
+      return true;
+    } catch {
+      closed = true;
+      return false;
+    }
+  };
+
   return new ReadableStream({
     async start(controller) {
       emit("info", "stream.start", { model });
-      const reader = anthropicStream.getReader();
+      reader = anthropicStream.getReader();
       try {
-        while (true) {
+        outer: while (!closed) {
           const { done, value } = await reader.read();
           if (done) break;
           const raw = decoder.decode(value, { stream: true });
@@ -55,37 +69,39 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
               } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
                 toolIndex++;
                 const name = unmapToolName(event.content_block.name);
-                controller.enqueue(chunk({
+                if (!safeEnqueue(controller, chunk({
                   id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                   choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: event.content_block.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
-                }));
+                }))) break outer;
                 sentRole = true;
               } else if (event.type === "content_block_delta") {
                 if (event.delta?.type === "input_json_delta" && event.delta.partial_json) {
-                  controller.enqueue(chunk({
+                  if (!safeEnqueue(controller, chunk({
                     id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                     choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, function: { arguments: event.delta.partial_json } }] }, finish_reason: null }],
-                  }));
+                  }))) break outer;
                 } else if (event.delta?.text) {
-                  controller.enqueue(chunk({
+                  if (!safeEnqueue(controller, chunk({
                     id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                     choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), content: event.delta.text }, finish_reason: null }],
-                  }));
+                  }))) break outer;
                   sentRole = true;
                 }
               } else if (event.type === "message_delta") {
                 if (event.usage) usage.output_tokens = event.usage.output_tokens || 0;
-                controller.enqueue(chunk({
+                if (!safeEnqueue(controller, chunk({
                   id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                   choices: [{ index: 0, delta: {}, finish_reason: stopMap[event.delta?.stop_reason] || "stop" }],
                   usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens, total_tokens: usage.input_tokens + usage.output_tokens },
-                }));
+                }))) break outer;
               }
             } catch {}
           }
         }
-        controller.enqueue("data: [DONE]\n\n");
-        controller.close();
+        if (!closed) {
+          safeEnqueue(controller, "data: [DONE]\n\n");
+          try { controller.close(); } catch {}
+        }
 
         emit("info", "stream.end", {
           model,
@@ -93,9 +109,16 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
           outputTokens: usage.output_tokens,
           cacheReadTokens: usage.cache_read_input_tokens,
           cacheCreationTokens: usage.cache_creation_input_tokens,
+          clientDisconnected: closed,
         });
-
-        // Update request record with token usage + response body
+      } catch (err) {
+        if (closed) {
+          emit("info", "stream.client_disconnect", { model, reason: (err as Error).message });
+        } else {
+          emit("error", "stream.error", { model, error: (err as Error).message, stack: (err as Error).stack });
+          try { controller.error(err); } catch {}
+        }
+      } finally {
         const traceId = traceAtStart?.traceId;
         if (traceId) {
           const truncated = accumulatedResponse.slice(0, MAX_RESPONSE_BODY);
@@ -109,10 +132,12 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
             is_stream: 1,
           });
         }
-      } catch (err) {
-        emit("error", "stream.error", { model, error: (err as Error).message, stack: (err as Error).stack });
-        controller.error(err);
       }
+    },
+    async cancel(reason) {
+      closed = true;
+      emit("info", "stream.client_disconnect", { model, reason: String(reason) });
+      try { await reader?.cancel(); } catch {}
     },
   });
 }
