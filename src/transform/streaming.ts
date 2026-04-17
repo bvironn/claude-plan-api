@@ -5,6 +5,14 @@ import { currentTrace } from "../observability/tracer.ts";
 
 const MAX_RESPONSE_BODY = 5 * 1024 * 1024; // 5 MB
 const PENDING_CANCEL_TIMEOUT_MS = 30_000;
+// SSE keep-alive heartbeat. When Anthropic is "thinking" between chunks,
+// long tool_use inputs can produce gaps > 10s, during which TCP middleboxes
+// (Tailscale, NAT, OpenCode's HTTP client) may time out and drop the
+// connection. Emit an SSE comment every 5s so the client keeps seeing
+// traffic and holds the socket open. Comment lines (leading `:`) are
+// ignored by every conforming SSE consumer.
+const KEEP_ALIVE_INTERVAL_MS = 5_000;
+const KEEP_ALIVE_COMMENT = ": keep-alive\n\n";
 
 export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string): ReadableStream {
   const decoder = new TextDecoder();
@@ -24,6 +32,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
 
   let closed = false;
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
   // Defer-cancel state: if client cancels mid tool_use, keep consuming upstream
   // until the tool_use block closes so telemetry captures the full JSON.
@@ -52,6 +61,13 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
       // `anthropicStream.getReader()` returns the node:stream/web variant.
       // Cast through unknown to bridge the two typings without a runtime shim.
       reader = anthropicStream.getReader() as unknown as ReadableStreamDefaultReader<Uint8Array>;
+
+      // Start SSE keep-alive heartbeats. safeEnqueue already no-ops when the
+      // stream is closed or in pending-cancel state, so the interval is safe
+      // to fire without additional guards. Cleared in finally and cancel().
+      keepAliveInterval = setInterval(() => {
+        safeEnqueue(controller, KEEP_ALIVE_COMMENT);
+      }, KEEP_ALIVE_INTERVAL_MS);
 
       // Single source of truth for per-event processing. Used by the main loop
       // AND by the end-of-stream flush block so residual bytes never diverge in
@@ -193,6 +209,10 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
           try { controller.error(err); } catch {}
         }
       } finally {
+        if (keepAliveInterval) {
+          clearInterval(keepAliveInterval);
+          keepAliveInterval = null;
+        }
         const traceId = traceAtStart?.traceId;
         if (traceId) {
           const truncated = accumulatedResponse.slice(0, MAX_RESPONSE_BODY);
@@ -217,6 +237,10 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
         return;
       }
       closed = true;
+      if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+      }
       emit("info", "stream.client_disconnect", { model, reason: String(reason) });
       try { await reader?.cancel(); } catch {}
     },
