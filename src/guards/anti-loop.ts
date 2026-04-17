@@ -25,6 +25,7 @@ export function detectTrailingToolErrors(messages: Array<Record<string, unknown>
   let trailingErrors = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
+    if (!msg) break;
     if (msg.role === "tool" && typeof msg.content === "string" && msg.content.includes("unavailable tool")) {
       trailingErrors++;
     } else {

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import type { SQLQueryBindings } from "bun:sqlite";
 import type { TelemetryEvent, RequestRecord } from "./types.ts";
 import { mkdirSync } from "node:fs";
 
@@ -167,9 +168,9 @@ export interface EventFilters {
   order?: "asc" | "desc";
 }
 
-function buildEventWhere(filters: EventFilters): { where: string; vals: unknown[] } {
+function buildEventWhere(filters: EventFilters): { where: string; vals: SQLQueryBindings[] } {
   const conds: string[] = [];
-  const vals: unknown[] = [];
+  const vals: SQLQueryBindings[] = [];
   if (filters.level?.length) { conds.push(`level IN (${filters.level.map(() => "?").join(",")})`); vals.push(...filters.level); }
   if (filters.stream?.length) { conds.push(`stream IN (${filters.stream.map(() => "?").join(",")})`); vals.push(...filters.stream); }
   if (filters.event?.length) { conds.push(`event IN (${filters.event.map(() => "?").join(",")})`); vals.push(...filters.event); }
@@ -184,7 +185,7 @@ function buildEventWhere(filters: EventFilters): { where: string; vals: unknown[
 export function countEvents(filters: EventFilters = {}): number {
   if (!db) return 0;
   const { where, vals } = buildEventWhere(filters);
-  const row = db.query<{ n: number }, unknown[]>(`SELECT COUNT(*) as n FROM events ${where}`).get(...vals);
+  const row = db.query<{ n: number }, SQLQueryBindings[]>(`SELECT COUNT(*) as n FROM events ${where}`).get(...vals);
   return row?.n ?? 0;
 }
 
@@ -216,7 +217,7 @@ export function queryEvents(filters: EventFilters = {}): TelemetryEvent[] {
   const limit = Math.min(filters.limit ?? 100, 1000);
   const offset = filters.offset ?? 0;
   const order = filters.order === "asc" ? "ASC" : "DESC";
-  const rows = db.query<Record<string, unknown>, unknown[]>(
+  const rows = db.query<Record<string, unknown>, SQLQueryBindings[]>(
     `SELECT * FROM events ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
   ).all(...vals, limit, offset);
   return rows.map(rowToEvent);
@@ -228,7 +229,7 @@ export function queryEventsRaw(filters: EventFilters = {}): Record<string, unkno
   const limit = Math.min(filters.limit ?? 100, 100_000);
   const offset = filters.offset ?? 0;
   const order = filters.order === "asc" ? "ASC" : "DESC";
-  return db.query<Record<string, unknown>, unknown[]>(
+  return db.query<Record<string, unknown>, SQLQueryBindings[]>(
     `SELECT * FROM events ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
   ).all(...vals, limit, offset);
 }
@@ -249,9 +250,9 @@ export interface RequestFilters {
   order?: "asc" | "desc";
 }
 
-function buildRequestWhere(filters: RequestFilters): { where: string; vals: unknown[] } {
+function buildRequestWhere(filters: RequestFilters): { where: string; vals: SQLQueryBindings[] } {
   const conds: string[] = [];
-  const vals: unknown[] = [];
+  const vals: SQLQueryBindings[] = [];
   if (filters.status?.length) { conds.push(`status IN (${filters.status.map(() => "?").join(",")})`); vals.push(...filters.status); }
   if (filters.method) { conds.push("method = ?"); vals.push(filters.method.toUpperCase()); }
   if (filters.path) { conds.push("path = ?"); vals.push(filters.path); }
@@ -268,7 +269,7 @@ function buildRequestWhere(filters: RequestFilters): { where: string; vals: unkn
 export function countRequests(filters: RequestFilters = {}): number {
   if (!db) return 0;
   const { where, vals } = buildRequestWhere(filters);
-  const row = db.query<{ n: number }, unknown[]>(`SELECT COUNT(*) as n FROM requests ${where}`).get(...vals);
+  const row = db.query<{ n: number }, SQLQueryBindings[]>(`SELECT COUNT(*) as n FROM requests ${where}`).get(...vals);
   return row?.n ?? 0;
 }
 
@@ -278,7 +279,7 @@ export function queryRequests(filters: RequestFilters = {}): RequestRecord[] {
   const limit = Math.min(filters.limit ?? 100, 1000);
   const offset = filters.offset ?? 0;
   const order = filters.order === "asc" ? "ASC" : "DESC";
-  const rows = db.query<RequestRecord, unknown[]>(
+  const rows = db.query<RequestRecord, SQLQueryBindings[]>(
     `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
   ).all(...vals, limit, offset);
   return rows;
@@ -290,7 +291,7 @@ export function queryRequestsRaw(filters: RequestFilters = {}): RequestRecord[] 
   const limit = Math.min(filters.limit ?? 100, 100_000);
   const offset = filters.offset ?? 0;
   const order = filters.order === "asc" ? "ASC" : "DESC";
-  return db.query<RequestRecord, unknown[]>(
+  return db.query<RequestRecord, SQLQueryBindings[]>(
     `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
   ).all(...vals, limit, offset);
 }
@@ -339,7 +340,8 @@ export function getMetrics(windowMs: number = 60_000): Metrics {
   ).all(since);
 
   const durations = latRows.map((r) => r.duration_ms);
-  const p = (pct: number) => durations.length ? durations[Math.floor(durations.length * pct / 100)] : 0;
+  const p = (pct: number): number =>
+    durations.length ? (durations[Math.floor(durations.length * pct / 100)] ?? 0) : 0;
   const byStatus: Record<number, number> = {};
   for (const r of statusRows) byStatus[r.status] = r.n;
   const byRoute: Record<string, number> = {};

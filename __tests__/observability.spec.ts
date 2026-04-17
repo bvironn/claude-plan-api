@@ -92,7 +92,7 @@ test("frontend click event → POST /api/telemetry → SQLite → /logs query", 
     body: JSON.stringify(payload),
   });
   expect(res.status).toBe(200);
-  const body = await res.json();
+  const body = (await res.json()) as { ok: boolean; count: number };
   expect(body.ok).toBe(true);
   expect(body.count).toBe(1);
 
@@ -100,11 +100,11 @@ test("frontend click event → POST /api/telemetry → SQLite → /logs query", 
 
   // verify via /logs query (this is what the dashboard would do)
   const logsRes = await fetch(`${BASE}/api/telemetry/logs?event=ui.click&limit=10`);
-  const logs = await logsRes.json();
-  const found = logs.events.find((e: any) => e.traceId === "test-trace-xyz");
+  const logs = (await logsRes.json()) as { events: Array<{ traceId?: string; event: string; payload: Record<string, unknown> }> };
+  const found = logs.events.find((e) => e.traceId === "test-trace-xyz");
   expect(found).toBeTruthy();
-  expect(found.payload.selector).toBe("button#export");
-  expect(found.payload.text).toBe("Export");
+  expect(found!.payload.selector).toBe("button#export");
+  expect(found!.payload.text).toBe("Export");
 });
 
 test("SSE stream receives live events", async () => {
@@ -150,7 +150,7 @@ test("SSE stream receives live events", async () => {
 test("metrics endpoint returns structured metrics", async () => {
   const res = await fetch(`${BASE}/api/telemetry/metrics?window=60000`);
   expect(res.status).toBe(200);
-  const m = await res.json();
+  const m = (await res.json()) as { requests_total: number };
   expect(m).toHaveProperty("window_ms");
   expect(m).toHaveProperty("latency_p50");
   expect(m).toHaveProperty("latency_p95");
@@ -191,7 +191,7 @@ test("anti-loop guard logs tool errors", async () => {
     }),
   });
   expect(res.status).toBe(200);
-  const body = await res.json();
+  const body = (await res.json()) as { ok: boolean; count: number };
   expect(body.ok).toBe(true);
   expect(body.count).toBe(1);
 
@@ -201,10 +201,10 @@ test("anti-loop guard logs tool errors", async () => {
   const logsRes = await fetch(
     `${BASE}/api/telemetry/logs?event=guard.toolError&limit=5`
   );
-  const logs = await logsRes.json();
-  const found = (logs.events as any[]).find((e: any) => e.traceId === traceId);
+  const logs = (await logsRes.json()) as { events: Array<{ traceId?: string; event: string }> };
+  const found = logs.events.find((e) => e.traceId === traceId);
   expect(found).toBeTruthy();
-  expect(found.event).toBe("guard.toolError");
+  expect(found!.event).toBe("guard.toolError");
 });
 
 test("frontend fetch interception skips x-telemetry-internal", async () => {

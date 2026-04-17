@@ -73,7 +73,7 @@ async function _handleTelemetryRequests(req: Request): Promise<Response> {
 
   const total = countRequests(filters);
   const rows = queryRequests(filters);
-  const requests = rows.map((r) => toCamel(r as Record<string, unknown>));
+  const requests = rows.map((r) => toCamel(r as unknown as Record<string, unknown>));
 
   return new Response(
     JSON.stringify({ total, limit: filters.limit, offset: filters.offset, requests }),
@@ -99,7 +99,7 @@ async function _handleTelemetryRequestById(req: Request): Promise<Response> {
   const events = queryEvents(evFilters);
 
   return new Response(
-    JSON.stringify({ request: toCamel(request as Record<string, unknown>), events }),
+    JSON.stringify({ request: toCamel(request as unknown as Record<string, unknown>), events }),
     { headers: CORS }
   );
 }

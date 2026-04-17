@@ -48,7 +48,10 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   return new ReadableStream({
     async start(controller) {
       emit("info", "stream.start", { model });
-      reader = anthropicStream.getReader();
+      // bun-types augments ReadableStreamDefaultReader with `readMany` but
+      // `anthropicStream.getReader()` returns the node:stream/web variant.
+      // Cast through unknown to bridge the two typings without a runtime shim.
+      reader = anthropicStream.getReader() as unknown as ReadableStreamDefaultReader<Uint8Array>;
 
       // Single source of truth for per-event processing. Used by the main loop
       // AND by the end-of-stream flush block so residual bytes never diverge in
@@ -116,6 +119,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
             break outer;
           }
 
+          if (!reader) break;
           const { done, value } = await reader.read();
           if (done) break;
           const raw = decoder.decode(value, { stream: true });
@@ -138,7 +142,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
             if (pendingCancel && !inToolUse) {
               emit("info", "stream.client_disconnect_completed", { model, toolUseCompleted: true, reason: pendingCancelReason });
               closed = true;
-              reader.cancel().catch(() => {});
+              reader?.cancel().catch(() => {});
               break outer;
             }
           }

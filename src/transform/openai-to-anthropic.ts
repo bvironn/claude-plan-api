@@ -46,7 +46,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
         tool_use_id: msg.tool_call_id,
         content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
       };
-      if (last?.role === "user" && (last as Record<string, unknown>)._batch) {
+      if (last?.role === "user" && (last as unknown as Record<string, unknown>)._batch) {
         (last.content as Array<Record<string, unknown>>).push(result);
       } else {
         const entry = { role: "user", content: [result], _batch: true } as unknown as AnthropicMessage;
@@ -56,7 +56,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
       messages.push({ role: msg.role as string, content: msg.content as string });
     }
   }
-  for (const msg of messages) delete (msg as Record<string, unknown>)._batch;
+  for (const msg of messages) delete (msg as unknown as Record<string, unknown>)._batch;
 
   const firstUser = messages.find((m) => m.role === "user");
   const firstText = typeof firstUser?.content === "string"
@@ -136,6 +136,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 function addCacheControlToLastUserText(messages: AnthropicMessage[]): void {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
+    if (!msg) continue;
     if (msg.role !== "user") continue;
 
     if (typeof msg.content === "string") {
@@ -147,8 +148,10 @@ function addCacheControlToLastUserText(messages: AnthropicMessage[]): void {
     if (Array.isArray(msg.content)) {
       const arr = msg.content as Array<Record<string, unknown>>;
       for (let j = arr.length - 1; j >= 0; j--) {
-        if (arr[j].type === "text") {
-          arr[j].cache_control = { type: "ephemeral", ttl: "1h" };
+        const item = arr[j];
+        if (!item) continue;
+        if (item.type === "text") {
+          item.cache_control = { type: "ephemeral", ttl: "1h" };
           return;
         }
       }

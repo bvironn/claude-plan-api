@@ -32,5 +32,10 @@ export const MODELS_LIST = [
 ].map((id) => ({ id, object: "model" as const, owned_by: "anthropic" }));
 
 export function resolveModel(input: string): string {
-  return MODEL_MAP[input] || MODEL_MAP[input.replace(/^(openai|claude-local)\//, "")] || MODEL_MAP["sonnet"];
+  return (
+    MODEL_MAP[input] ||
+    MODEL_MAP[input.replace(/^(openai|claude-local)\//, "")] ||
+    MODEL_MAP["sonnet"] ||
+    "claude-sonnet-4-6"
+  );
 }

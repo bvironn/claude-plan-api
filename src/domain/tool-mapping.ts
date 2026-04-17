@@ -59,14 +59,14 @@ export function sanitizeToolName(name: string): string {
 function autoCanonical(name: string): string | null {
   // Single-word lowercase: bash -> Bash, read -> Read.
   if (/^[a-z][a-z]*$/.test(name)) {
-    return name[0].toUpperCase() + name.slice(1);
+    return name[0]!.toUpperCase() + name.slice(1);
   }
   // snake_case → PascalCase: web_search -> WebSearch, code_execution -> CodeExecution.
   // Each segment must be lowercase letters/digits, first char of each must be a letter.
   if (/^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)+$/.test(name)) {
     return name
       .split("_")
-      .map((s) => s[0].toUpperCase() + s.slice(1))
+      .map((s) => s[0]!.toUpperCase() + s.slice(1))
       .join("");
   }
   return null;
