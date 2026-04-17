@@ -2,7 +2,11 @@ import { getCredentials } from "../domain/credentials.ts";
 import { SESSION_ID } from "../session.ts";
 import { VERSION } from "../config.ts";
 
-export function buildBetas(model: string, isStructuredOutput = false): string {
+export function buildBetas(
+  model: string,
+  isStructuredOutput = false,
+  excluded?: Set<string>,
+): string {
   if (isStructuredOutput) {
     const parts = [
       "oauth-2025-04-20",
@@ -13,7 +17,7 @@ export function buildBetas(model: string, isStructuredOutput = false): string {
       "advisor-tool-2026-03-01",
       "structured-outputs-2025-12-15",
     ];
-    return parts.join(",");
+    return filterExcluded(parts, excluded).join(",");
   }
 
   const parts = [
@@ -33,14 +37,23 @@ export function buildBetas(model: string, isStructuredOutput = false): string {
     parts.splice(idx + 1, 0, "context-1m-2025-08-07");
   }
 
-  return parts.join(",");
+  return filterExcluded(parts, excluded).join(",");
 }
 
-export function buildHeaders(model: string, isStructuredOutput = false): Record<string, string> {
+function filterExcluded(parts: string[], excluded?: Set<string>): string[] {
+  if (!excluded || excluded.size === 0) return parts;
+  return parts.filter((b) => !excluded.has(b));
+}
+
+export function buildHeaders(
+  model: string,
+  isStructuredOutput = false,
+  excluded?: Set<string>,
+): Record<string, string> {
   return {
     authorization: `Bearer ${getCredentials().accessToken}`,
     "anthropic-version": "2023-06-01",
-    "anthropic-beta": buildBetas(model, isStructuredOutput),
+    "anthropic-beta": buildBetas(model, isStructuredOutput, excluded),
     "anthropic-dangerous-direct-browser-access": "true",
     "x-app": "cli",
     "user-agent": `claude-cli/${VERSION} (external, cli)`,
