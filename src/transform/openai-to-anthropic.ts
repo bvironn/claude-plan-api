@@ -1,6 +1,12 @@
 import type { AnthropicMessage } from "../types.ts";
 import { resetDynamicMap, mapToolName } from "../domain/tool-mapping.ts";
-import { resolveModelVariant, getModelCapabilities, getEffortLevels } from "../domain/models.ts";
+import {
+  resolveModelVariant,
+  getModelCapabilities,
+  getEffortLevels,
+  getModelLimits,
+  pickContextManagementEdit,
+} from "../domain/models.ts";
 import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
 import { emit } from "../observability/logger.ts";
@@ -114,9 +120,15 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 
   const repaired = repairToolPairs(messages);
 
+  // Resolve the per-model default max_tokens from the registry. Falls back
+  // to a conservative 64000 when the upstream hasn't declared it (old models,
+  // fallback catalog). Client-supplied body.max_tokens always wins.
+  const limits = getModelLimits(model);
+  const defaultMaxTokens = limits.maxOutputTokens ?? 64000;
+
   const result: Record<string, unknown> = {
     model,
-    max_tokens: (body.max_tokens as number) || 64000,
+    max_tokens: (body.max_tokens as number) || defaultMaxTokens,
     stream: body.stream || false,
     system,
     messages: repaired,
@@ -135,9 +147,15 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     result.thinking = { type: "adaptive" };
   }
   if (caps.contextManagement && !isStructuredOutput) {
-    result.context_management = {
-      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
-    };
+    // Pick the edit type from the upstream declaration rather than hardcoding.
+    // Future models may drop clear_thinking_20251015 or add new edits; this
+    // keeps us in sync automatically.
+    const edit = pickContextManagementEdit(model);
+    if (edit) {
+      result.context_management = {
+        edits: [{ type: edit, keep: "all" }],
+      };
+    }
   }
   if (caps.outputEffort && !isStructuredOutput && effectiveEffort !== null) {
     result.output_config = { effort: effectiveEffort };

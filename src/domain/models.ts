@@ -29,34 +29,45 @@ export interface ModelCapabilities {
 // where the upstream disagrees, the upstream wins at runtime because the
 // registry is populated lazily on boot (see `ensureRegistry`).
 
+// Static fallback when the upstream is unreachable. Token limits, extended
+// capabilities, and context-management edits are left at conservative
+// null/false values. The live registry (once populated) fully overrides these.
+function makeFallback(partial: Pick<UpstreamModel, "id" | "displayName" | "adaptiveThinking" | "contextManagement" | "outputEffort" | "structuredOutputs"> & Partial<UpstreamModel>): UpstreamModel {
+  return {
+    createdAt: null,
+    maxInputTokens: null,
+    maxOutputTokens: null,
+    thinkingEnabled: false,
+    imageInput: false,
+    pdfInput: false,
+    citations: false,
+    codeExecution: false,
+    batch: false,
+    effortLevels: partial.outputEffort ? ["low", "medium", "high", "max"] : [],
+    contextManagementEdits: partial.contextManagement ? ["clear_thinking_20251015"] : [],
+    ...partial,
+  };
+}
+
 const FALLBACK_MODELS: readonly UpstreamModel[] = [
-  { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", createdAt: null,
-    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
-    effortLevels: ["low", "medium", "high", "max"] },
-  { id: "claude-opus-4-6", displayName: "Claude Opus 4.6", createdAt: null,
-    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
-    effortLevels: ["low", "medium", "high", "max"] },
-  { id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
-  { id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
-  { id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
-  { id: "claude-opus-4-1-20250805", displayName: "Claude Opus 4.1", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
-  { id: "claude-opus-4-20250514", displayName: "Claude Opus 4", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
-  { id: "claude-sonnet-4-20250514", displayName: "Claude Sonnet 4", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
-  { id: "claude-3-haiku-20240307", displayName: "Claude 3 Haiku", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
-    effortLevels: [] },
+  makeFallback({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-opus-4-6", displayName: "Claude Opus 4.6",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
+  makeFallback({ id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
+  makeFallback({ id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
+  makeFallback({ id: "claude-opus-4-1-20250805", displayName: "Claude Opus 4.1",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
+  makeFallback({ id: "claude-opus-4-20250514", displayName: "Claude Opus 4",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
+  makeFallback({ id: "claude-sonnet-4-20250514", displayName: "Claude Sonnet 4",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
+  makeFallback({ id: "claude-3-haiku-20240307", displayName: "Claude 3 Haiku",
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false }),
 ];
 
 const DEFAULT_CAPABILITIES: ModelCapabilities = {
@@ -154,6 +165,62 @@ export function getModelCapabilities(model: string): ModelCapabilities {
 export function getEffortLevels(model: string): readonly string[] {
   const entry = indexById(currentCatalog()).get(model);
   return entry?.effortLevels ?? [];
+}
+
+export interface ModelLimits {
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
+}
+
+/**
+ * Token limits declared by the upstream. Nulls mean "not declared" — the
+ * caller should fall back to a global default.
+ */
+export function getModelLimits(model: string): ModelLimits {
+  const entry = indexById(currentCatalog()).get(model);
+  return {
+    maxInputTokens: entry?.maxInputTokens ?? null,
+    maxOutputTokens: entry?.maxOutputTokens ?? null,
+  };
+}
+
+/**
+ * Context-management edit types declared supported by this model, in the
+ * order the upstream listed them. Empty array when the feature is off.
+ *
+ * Today Anthropic publishes three edits:
+ *   clear_thinking_20251015
+ *   clear_tool_uses_20250919
+ *   compact_20260112
+ * More can appear over time.
+ */
+export function getContextManagementEdits(model: string): readonly string[] {
+  const entry = indexById(currentCatalog()).get(model);
+  return entry?.contextManagementEdits ?? [];
+}
+
+/**
+ * Pick the best context-management edit type to apply for this model.
+ *
+ * Preference order:
+ *   1. clear_thinking_20251015 — what the proxy historically used; keeps
+ *      behaviour stable for the 4-6+ models that are the main targets.
+ *   2. The newest (by YYYYMMDD suffix) edit the model declares, as a
+ *      forward-compat fallback when (1) is not available.
+ *
+ * Returns null when the model declares no edits.
+ */
+export function pickContextManagementEdit(model: string): string | null {
+  const edits = getContextManagementEdits(model);
+  if (edits.length === 0) return null;
+  if (edits.includes("clear_thinking_20251015")) return "clear_thinking_20251015";
+  // Pick the edit with the greatest date suffix we can parse.
+  const sorted = [...edits].sort((a, b) => {
+    const da = a.match(/(\d{8})$/)?.[1] ?? "";
+    const db = b.match(/(\d{8})$/)?.[1] ?? "";
+    return db.localeCompare(da); // descending
+  });
+  return sorted[0] ?? null;
 }
 
 /**

@@ -19,12 +19,33 @@ export interface UpstreamModel {
   id: string;
   displayName: string;
   createdAt: string | null;
+
+  // Token limits declared by the upstream. Null means "not declared" —
+  // transform code falls back to a global default.
+  maxInputTokens: number | null;
+  maxOutputTokens: number | null;
+
+  // OAuth-sensitive features we already gate on.
   adaptiveThinking: boolean;
+  thinkingEnabled: boolean;
   contextManagement: boolean;
   outputEffort: boolean;
   structuredOutputs: boolean;
-  /** Effort levels declared supported by the upstream for this model. Empty when outputEffort is false. */
+
+  // Content/input capabilities. Useful for dashboard display and pre-flight
+  // validation (e.g. reject images routed to an image-less model).
+  imageInput: boolean;
+  pdfInput: boolean;
+  citations: boolean;
+  codeExecution: boolean;
+  batch: boolean; // OAuth plan cannot use batches, but the flag is exposed.
+
+  // Effort levels supported by this specific model. Empty when outputEffort is false.
   effortLevels: string[];
+
+  // Context management edit types declared supported (e.g. clear_thinking_20251015,
+  // clear_tool_uses_20250919, compact_20260112). Ordered as declared by upstream.
+  contextManagementEdits: string[];
 }
 
 interface AnthropicSupportedFlag { supported?: boolean }
@@ -36,17 +57,31 @@ interface AnthropicEffortCapability {
   [level: string]: AnthropicSupportedFlag | boolean | undefined;
 }
 
+interface AnthropicContextManagementCapability {
+  supported?: boolean;
+  // Per-edit-type flags. Keys are arbitrary (clear_thinking_20251015,
+  // clear_tool_uses_20250919, compact_20260112 today).
+  [edit: string]: AnthropicSupportedFlag | boolean | undefined;
+}
+
 interface AnthropicModelCapabilities {
-  thinking?: { types?: { adaptive?: AnthropicSupportedFlag } };
-  context_management?: AnthropicSupportedFlag;
+  thinking?: { supported?: boolean; types?: { adaptive?: AnthropicSupportedFlag; enabled?: AnthropicSupportedFlag } };
+  context_management?: AnthropicContextManagementCapability;
   effort?: AnthropicEffortCapability;
   structured_outputs?: AnthropicSupportedFlag;
+  image_input?: AnthropicSupportedFlag;
+  pdf_input?: AnthropicSupportedFlag;
+  citations?: AnthropicSupportedFlag;
+  code_execution?: AnthropicSupportedFlag;
+  batch?: AnthropicSupportedFlag;
 }
 
 interface AnthropicModelEntry {
   id: string;
   display_name?: string;
   created_at?: string;
+  max_input_tokens?: number;
+  max_tokens?: number;
   capabilities?: AnthropicModelCapabilities;
 }
 
@@ -61,12 +96,25 @@ function extractEffortLevels(effort: AnthropicEffortCapability | undefined): str
   const levels: string[] = [];
   for (const [key, value] of Object.entries(effort)) {
     if (key === "supported") continue;
-    // Each level entry looks like { supported: true } — ignore anything else.
     if (value && typeof value === "object" && (value as AnthropicSupportedFlag).supported === true) {
       levels.push(key);
     }
   }
   return levels;
+}
+
+function extractContextManagementEdits(
+  ctx: AnthropicContextManagementCapability | undefined,
+): string[] {
+  if (!ctx || ctx.supported !== true) return [];
+  const edits: string[] = [];
+  for (const [key, value] of Object.entries(ctx)) {
+    if (key === "supported") continue;
+    if (value && typeof value === "object" && (value as AnthropicSupportedFlag).supported === true) {
+      edits.push(key);
+    }
+  }
+  return edits;
 }
 
 function normalize(entry: AnthropicModelEntry): UpstreamModel {
@@ -75,11 +123,20 @@ function normalize(entry: AnthropicModelEntry): UpstreamModel {
     id: entry.id,
     displayName: entry.display_name ?? entry.id,
     createdAt: entry.created_at ?? null,
+    maxInputTokens: entry.max_input_tokens ?? null,
+    maxOutputTokens: entry.max_tokens ?? null,
     adaptiveThinking: caps.thinking?.types?.adaptive?.supported === true,
+    thinkingEnabled: caps.thinking?.types?.enabled?.supported === true,
     contextManagement: caps.context_management?.supported === true,
     outputEffort: caps.effort?.supported === true,
     structuredOutputs: caps.structured_outputs?.supported === true,
+    imageInput: caps.image_input?.supported === true,
+    pdfInput: caps.pdf_input?.supported === true,
+    citations: caps.citations?.supported === true,
+    codeExecution: caps.code_execution?.supported === true,
+    batch: caps.batch?.supported === true,
     effortLevels: extractEffortLevels(caps.effort),
+    contextManagementEdits: extractContextManagementEdits(caps.context_management),
   };
 }
 

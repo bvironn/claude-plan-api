@@ -3,6 +3,9 @@ import { openaiToAnthropic } from "../src/transform/openai-to-anthropic.ts";
 import {
   __seedRegistryForTests,
   getModelCapabilities,
+  getModelLimits,
+  getContextManagementEdits,
+  pickContextManagementEdit,
 } from "../src/domain/models.ts";
 import type { UpstreamModel } from "../src/upstream/models-client.ts";
 
@@ -10,23 +13,53 @@ import type { UpstreamModel } from "../src/upstream/models-client.ts";
 // deterministically without hitting the network. The seed mirrors a
 // realistic upstream response: families that support adaptive thinking,
 // families that don't, legacy models, and a minimal / unknown model.
+function seedModel(partial: Partial<UpstreamModel> & Pick<UpstreamModel, "id" | "displayName">): UpstreamModel {
+  return {
+    createdAt: null,
+    maxInputTokens: null,
+    maxOutputTokens: null,
+    adaptiveThinking: false,
+    thinkingEnabled: false,
+    contextManagement: false,
+    outputEffort: false,
+    structuredOutputs: false,
+    imageInput: false,
+    pdfInput: false,
+    citations: false,
+    codeExecution: false,
+    batch: false,
+    effortLevels: [],
+    contextManagementEdits: [],
+    ...partial,
+  };
+}
+
 const SEEDED_REGISTRY: UpstreamModel[] = [
-  { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", createdAt: null,
+  seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6",
+    maxInputTokens: 1_000_000, maxOutputTokens: 128_000,
     adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
-    effortLevels: ["low", "medium", "high", "max"] },
-  { id: "claude-opus-4-6", displayName: "Claude Opus 4.6", createdAt: null,
+    effortLevels: ["low", "medium", "high", "max"],
+    contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015", "compact_20260112"],
+    imageInput: true, pdfInput: true, citations: true, codeExecution: true, batch: true }),
+  seedModel({ id: "claude-opus-4-6", displayName: "Claude Opus 4.6",
+    maxInputTokens: 1_000_000, maxOutputTokens: 128_000,
     adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
-    effortLevels: ["low", "medium", "high", "max"] },
-  { id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5", createdAt: null,
+    effortLevels: ["low", "medium", "high", "max"],
+    contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015", "compact_20260112"],
+    imageInput: true, pdfInput: true, citations: true, codeExecution: true, batch: true }),
+  seedModel({ id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5",
+    maxInputTokens: 200_000, maxOutputTokens: 64_000,
     adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true,
-    effortLevels: [] },
-  { id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5", createdAt: null,
+    contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015"] }),
+  seedModel({ id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5",
+    maxInputTokens: 200_000, maxOutputTokens: 64_000,
     adaptiveThinking: false, contextManagement: true, outputEffort: true, structuredOutputs: true,
-    effortLevels: ["low", "medium", "high"] }, // deliberately no "max" — mirrors real upstream
-  { id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5", createdAt: null,
+    effortLevels: ["low", "medium", "high"],
+    contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015"] }),
+  seedModel({ id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5",
+    maxInputTokens: 200_000, maxOutputTokens: 32_000,
     adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true,
-    effortLevels: [] },
-  // A model intentionally left out: "totally-unknown-model-9000" → default all-false.
+    contextManagementEdits: ["clear_tool_uses_20250919"] }), // only one edit — tests fallback
 ];
 
 let restore: (() => void) | null = null;
@@ -139,8 +172,7 @@ describe("openaiToAnthropic — model capability gating", () => {
     const undo = __seedRegistryForTests([
       // Only one entry; claude-sonnet-4-6 is absent so resolveModel falls
       // back to the first id, which has all caps disabled.
-      { id: "null-capable-model", displayName: "null", createdAt: null,
-        adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+      seedModel({ id: "null-capable-model", displayName: "null" }),
     ]);
     try {
       const { body } = openaiToAnthropic({
@@ -309,5 +341,108 @@ describe("openaiToAnthropic — effort variants", () => {
     const outputConfig = body.output_config as Record<string, unknown>;
     expect(outputConfig.effort).toBeUndefined();
     expect(outputConfig.format).toBeDefined();
+  });
+});
+
+describe("model limits (from upstream)", () => {
+  test("getModelLimits reads max_input_tokens and max_output_tokens", () => {
+    expect(getModelLimits("claude-sonnet-4-6")).toEqual({
+      maxInputTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    });
+    expect(getModelLimits("claude-haiku-4-5-20251001")).toEqual({
+      maxInputTokens: 200_000,
+      maxOutputTokens: 32_000,
+    });
+  });
+
+  test("getModelLimits returns nulls for unknown model", () => {
+    expect(getModelLimits("totally-unknown-9000")).toEqual({
+      maxInputTokens: null,
+      maxOutputTokens: null,
+    });
+  });
+
+  test("transform uses model max_output_tokens as default when body omits it", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.max_tokens).toBe(128_000); // from registry, not hardcoded 64000
+  });
+
+  test("transform honors body.max_tokens over model default", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      max_tokens: 4096,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.max_tokens).toBe(4096);
+  });
+
+  test("transform falls back to 64000 when model has no declared max_output_tokens", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "no-limits-model", displayName: "no limits" }),
+    ]);
+    try {
+      const { body } = openaiToAnthropic({
+        model: "no-limits-model",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(body.max_tokens).toBe(64_000);
+    } finally {
+      undo();
+    }
+  });
+});
+
+describe("context-management edit selection (from upstream)", () => {
+  test("pickContextManagementEdit prefers clear_thinking_20251015 when present", () => {
+    // Sonnet 4.6 seed has all three edits — should pick clear_thinking.
+    expect(pickContextManagementEdit("claude-sonnet-4-6")).toBe("clear_thinking_20251015");
+  });
+
+  test("pickContextManagementEdit falls back to newest edit when clear_thinking absent", () => {
+    // Haiku seed has only clear_tool_uses_20250919.
+    expect(pickContextManagementEdit("claude-haiku-4-5-20251001")).toBe("clear_tool_uses_20250919");
+  });
+
+  test("pickContextManagementEdit returns null when no edits declared", () => {
+    expect(pickContextManagementEdit("claude-sonnet-4-5-20250929")).toBe("clear_thinking_20251015"); // has clear_thinking
+    // A model with no edits at all:
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "no-ctx-model", displayName: "no ctx",
+        contextManagement: false, contextManagementEdits: [] }),
+    ]);
+    try {
+      expect(pickContextManagementEdit("no-ctx-model")).toBeNull();
+    } finally {
+      undo();
+    }
+  });
+
+  test("getContextManagementEdits exposes the raw list from registry", () => {
+    expect(getContextManagementEdits("claude-sonnet-4-6")).toEqual(
+      ["clear_tool_uses_20250919", "clear_thinking_20251015", "compact_20260112"],
+    );
+  });
+
+  test("transform picks newest edit when clear_thinking_20251015 is unsupported", () => {
+    // Seed a model whose ONLY edit is the newer "compact_20260112".
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "only-compact-model", displayName: "only compact",
+        contextManagement: true, contextManagementEdits: ["compact_20260112"] }),
+    ]);
+    try {
+      const { body } = openaiToAnthropic({
+        model: "only-compact-model",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(body.context_management).toEqual({
+        edits: [{ type: "compact_20260112", keep: "all" }],
+      });
+    } finally {
+      undo();
+    }
   });
 });
