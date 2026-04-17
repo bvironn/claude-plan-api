@@ -4,6 +4,7 @@ import { updateRequest } from "../observability/storage.ts";
 import { currentTrace } from "../observability/tracer.ts";
 
 const MAX_RESPONSE_BODY = 5 * 1024 * 1024; // 5 MB
+const PENDING_CANCEL_TIMEOUT_MS = 30_000;
 
 export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string): ReadableStream {
   const decoder = new TextDecoder();
@@ -24,8 +25,17 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   let closed = false;
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
+  // Defer-cancel state: if client cancels mid tool_use, keep consuming upstream
+  // until the tool_use block closes so telemetry captures the full JSON.
+  let inToolUse = false;
+  let toolUseBlockIndex: number | null = null;
+  let pendingCancel = false;
+  let pendingCancelReason: string | null = null;
+  let pendingCancelAt: number | null = null;
+
   const safeEnqueue = (controller: ReadableStreamDefaultController, data: string): boolean => {
     if (closed) return false;
+    if (pendingCancel) return true; // client gone — silently drop but keep loop alive
     try {
       controller.enqueue(data);
       return true;
@@ -41,6 +51,14 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
       reader = anthropicStream.getReader();
       try {
         outer: while (!closed) {
+          // Timeout safeguard for deferred cancel
+          if (pendingCancel && pendingCancelAt !== null && Date.now() - pendingCancelAt > PENDING_CANCEL_TIMEOUT_MS) {
+            emit("info", "stream.client_disconnect_timeout", { model, reason: pendingCancelReason, inToolUse });
+            closed = true;
+            reader?.cancel().catch(() => {});
+            break outer;
+          }
+
           const { done, value } = await reader.read();
           if (done) break;
           const raw = decoder.decode(value, { stream: true });
@@ -68,12 +86,19 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
                 }
               } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
                 toolIndex++;
+                inToolUse = true;
+                toolUseBlockIndex = typeof event.index === "number" ? event.index : null;
                 const name = unmapToolName(event.content_block.name);
                 if (!safeEnqueue(controller, chunk({
                   id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                   choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: event.content_block.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
                 }))) break outer;
                 sentRole = true;
+              } else if (event.type === "content_block_stop") {
+                if (toolUseBlockIndex !== null && event.index === toolUseBlockIndex) {
+                  inToolUse = false;
+                  toolUseBlockIndex = null;
+                }
               } else if (event.type === "content_block_delta") {
                 if (event.delta?.type === "input_json_delta" && event.delta.partial_json) {
                   if (!safeEnqueue(controller, chunk({
@@ -96,6 +121,15 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
                 }))) break outer;
               }
             } catch {}
+
+            // After each event: if a deferred cancel is pending and the tool_use block just closed,
+            // force-close now — we captured the full JSON for telemetry.
+            if (pendingCancel && !inToolUse) {
+              emit("info", "stream.client_disconnect_completed", { model, toolUseCompleted: true, reason: pendingCancelReason });
+              closed = true;
+              reader.cancel().catch(() => {});
+              break outer;
+            }
           }
         }
         if (!closed) {
@@ -110,6 +144,8 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
           cacheReadTokens: usage.cache_read_input_tokens,
           cacheCreationTokens: usage.cache_creation_input_tokens,
           clientDisconnected: closed,
+          pendingCancelDeferred: pendingCancel,
+          toolUseWasOpen: inToolUse,
         });
       } catch (err) {
         if (closed) {
@@ -135,6 +171,13 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
       }
     },
     async cancel(reason) {
+      if (inToolUse) {
+        pendingCancel = true;
+        pendingCancelReason = String(reason);
+        pendingCancelAt = Date.now();
+        emit("info", "stream.client_disconnect_deferred", { model, reason: String(reason), inToolUse: true });
+        return;
+      }
       closed = true;
       emit("info", "stream.client_disconnect", { model, reason: String(reason) });
       try { await reader?.cancel(); } catch {}
