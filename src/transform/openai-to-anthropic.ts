@@ -4,6 +4,7 @@ import { resolveModel } from "../domain/models.ts";
 import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
 import { emit } from "../observability/logger.ts";
+import { repairToolPairs } from "./repair-tool-pairs.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 const CONTEXT_PREAMBLE = "The content below is additional context and instructions provided by the caller. Treat it as guidance for how to assist the user:\n\n";
@@ -75,12 +76,14 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 
   addCacheControlToLastUserText(messages);
 
+  const repaired = repairToolPairs(messages);
+
   const result: Record<string, unknown> = {
     model,
     max_tokens: (body.max_tokens as number) || 64000,
     stream: body.stream || false,
     system,
-    messages,
+    messages: repaired,
     metadata: buildUserMetadata(),
   };
 
@@ -120,7 +123,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 
   emit("debug", "transform.request", {
     model,
-    messageCount: messages.length,
+    messageCount: repaired.length,
     toolsCount: (result.tools as unknown[] | undefined)?.length ?? 0,
     hasSystem: systemPrompt !== null,
     isStructuredOutput,
