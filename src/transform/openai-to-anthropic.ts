@@ -1,6 +1,6 @@
 import type { AnthropicMessage } from "../types.ts";
 import { resetDynamicMap, mapToolName } from "../domain/tool-mapping.ts";
-import { resolveModel } from "../domain/models.ts";
+import { resolveModel, getModelCapabilities } from "../domain/models.ts";
 import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
 import { emit } from "../observability/logger.ts";
@@ -93,11 +93,17 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     result.temperature = 1;
   }
 
-  if (!isHaiku && !isStructuredOutput) {
+  const caps = getModelCapabilities(model);
+
+  if (caps.adaptiveThinking && !isStructuredOutput) {
     result.thinking = { type: "adaptive" };
+  }
+  if (caps.contextManagement && !isStructuredOutput) {
     result.context_management = {
       edits: [{ type: "clear_thinking_20251015", keep: "all" }],
     };
+  }
+  if (caps.outputEffort && !isStructuredOutput) {
     result.output_config = { effort: "medium" };
   }
 
