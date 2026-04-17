@@ -1,6 +1,38 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { openaiToAnthropic } from "../src/transform/openai-to-anthropic.ts";
-import { MODEL_CAPABILITIES, getModelCapabilities } from "../src/domain/models.ts";
+import {
+  __seedRegistryForTests,
+  getModelCapabilities,
+} from "../src/domain/models.ts";
+import type { UpstreamModel } from "../src/upstream/models-client.ts";
+
+// Tests run against a seeded registry so we exercise the capability gating
+// deterministically without hitting the network. The seed mirrors a
+// realistic upstream response: families that support adaptive thinking,
+// families that don't, legacy models, and a minimal / unknown model.
+const SEEDED_REGISTRY: UpstreamModel[] = [
+  { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", createdAt: null,
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true },
+  { id: "claude-opus-4-6", displayName: "Claude Opus 4.6", createdAt: null,
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true },
+  { id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5", createdAt: null,
+    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true },
+  { id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5", createdAt: null,
+    adaptiveThinking: false, contextManagement: true, outputEffort: true, structuredOutputs: true },
+  { id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5", createdAt: null,
+    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true },
+  // A model intentionally left out: "totally-unknown-model-9000" → default all-false.
+];
+
+let restore: (() => void) | null = null;
+
+beforeAll(() => {
+  restore = __seedRegistryForTests(SEEDED_REGISTRY);
+});
+
+afterAll(() => {
+  restore?.();
+});
 
 describe("openaiToAnthropic — model capability gating", () => {
   // --- REQ-1: Adaptive thinking gated off for legacy models ---
@@ -21,16 +53,21 @@ describe("openaiToAnthropic — model capability gating", () => {
     expect(body.thinking).toEqual({ type: "adaptive" });
   });
 
-  // --- REQ-2: Context management gated off for non-capable models ---
-  test("REQ-3: claude-opus-4-5-20251101 does NOT get context_management", () => {
+  // --- REQ-2: Context management now tracks upstream truth ---
+  //
+  // Historical note: before migrating to upstream-as-truth, the proxy
+  // assumed claude-opus-4-5 did NOT support context_management. The real
+  // /v1/models response declares it supported, so we now send it.
+  test("REQ-3: claude-opus-4-5-20251101 DOES get context_management per upstream", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-5-20251101",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.context_management).toBeUndefined();
+    expect(body.context_management).toEqual({
+      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+    });
   });
 
-  // Positive counterpart for context_management — forces real logic (triangulation)
   test("REQ-3b: claude-opus-4-6 DOES get context_management", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-6",
@@ -86,40 +123,44 @@ describe("openaiToAnthropic — model capability gating", () => {
     });
   });
 
-  // --- REQ-5: Unknown/future model defaults to all-false ---
-  // NOTE: `resolveModel` falls back to sonnet-4-6 for unrecognized inputs, so
-  // the unknown-default path in `openaiToAnthropic` is only reachable when a
-  // model IS resolved but is NOT yet in MODEL_CAPABILITIES. We simulate that
-  // by temporarily removing an entry, then restoring it.
-  test("REQ-6: model resolved but missing from MODEL_CAPABILITIES defaults to no gated features", () => {
-    const key = "claude-sonnet-4-6";
-    const saved = MODEL_CAPABILITIES[key];
-    delete MODEL_CAPABILITIES[key];
+  // --- REQ-5: Model absent from registry defaults to all-false ---
+  //
+  // resolveModel falls back to claude-sonnet-4-6 for unknown inputs, so to
+  // exercise the "registered but unknown capability" branch we seed a
+  // temporary registry lacking the target id and then query through a
+  // fresh openaiToAnthropic call.
+  test("REQ-6: model resolved but missing from registry defaults to no gated features", () => {
+    const undo = __seedRegistryForTests([
+      // Only one entry; claude-sonnet-4-6 is absent so resolveModel falls
+      // back to the first id, which has all caps disabled.
+      { id: "null-capable-model", displayName: "null", createdAt: null,
+        adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    ]);
     try {
       const { body } = openaiToAnthropic({
-        model: key,
+        model: "null-capable-model",
         messages: [{ role: "user", content: "hi" }],
       });
       expect(body.thinking).toBeUndefined();
       expect(body.context_management).toBeUndefined();
       expect(body.output_config).toBeUndefined();
     } finally {
-      MODEL_CAPABILITIES[key] = saved!;
+      undo();
     }
   });
 
-  // --- REQ-6: Capability map testability — helper returns map entry ---
-  test("REQ-7: getModelCapabilities returns explicit entry and default for unknown", () => {
-    // Explicit entry
+  // --- REQ-6: getModelCapabilities reads from the registry ---
+  test("REQ-7: getModelCapabilities returns registry entry and default for unknown", () => {
+    // Known capable entry from the seed
     expect(getModelCapabilities("claude-sonnet-4-6")).toEqual({
       adaptiveThinking: true,
       contextManagement: true,
       outputEffort: true,
     });
-    // Legacy entry
+    // Known legacy entry from the seed (mirrors upstream: ctx-mgmt true, no adaptive/effort)
     expect(getModelCapabilities("claude-sonnet-4-5-20250929")).toEqual({
       adaptiveThinking: false,
-      contextManagement: false,
+      contextManagement: true,
       outputEffort: false,
     });
     // Unknown model → safe default
@@ -128,8 +169,6 @@ describe("openaiToAnthropic — model capability gating", () => {
       contextManagement: false,
       outputEffort: false,
     });
-    // Map export is mutable-capable (testability requirement)
-    expect(MODEL_CAPABILITIES["claude-sonnet-4-6"]).toBeDefined();
   });
 
   // --- REQ-7: Regression test for the exact production 400 ---
@@ -141,8 +180,5 @@ describe("openaiToAnthropic — model capability gating", () => {
       messages: [{ role: "user", content: "production regression" }],
     });
     expect(body.thinking).toBeUndefined();
-    // Also assert nothing leaked in context_management / output_config
-    expect(body.context_management).toBeUndefined();
-    expect(body.output_config).toBeUndefined();
   });
 });

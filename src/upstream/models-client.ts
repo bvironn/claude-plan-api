@@ -1,0 +1,97 @@
+// Upstream client for Anthropic's GET /v1/models endpoint.
+//
+// Discovery: Anthropic accepts OAuth (Bearer) on /v1/models ONLY when the
+// `anthropic-beta: oauth-2025-04-20` header is present. Without that beta
+// the server replies 401 "OAuth authentication is currently not supported."
+//
+// The response carries a `capabilities` object per model that declares the
+// real per-model feature support (adaptive thinking, context management,
+// effort, structured outputs). This is the source of truth that replaces
+// the historical hardcoded MODEL_CAPABILITIES table.
+
+import { VERSION } from "../config.ts";
+import { ensureValidToken, getCredentials } from "../domain/credentials.ts";
+import { SESSION_ID } from "../session.ts";
+import { emit } from "../observability/logger.ts";
+import { withSpan } from "../observability/tracer.ts";
+
+export interface UpstreamModel {
+  id: string;
+  displayName: string;
+  createdAt: string | null;
+  adaptiveThinking: boolean;
+  contextManagement: boolean;
+  outputEffort: boolean;
+  structuredOutputs: boolean;
+}
+
+interface AnthropicModelCapabilities {
+  thinking?: { types?: { adaptive?: { supported?: boolean } } };
+  context_management?: { supported?: boolean };
+  effort?: { supported?: boolean };
+  structured_outputs?: { supported?: boolean };
+}
+
+interface AnthropicModelEntry {
+  id: string;
+  display_name?: string;
+  created_at?: string;
+  capabilities?: AnthropicModelCapabilities;
+}
+
+interface AnthropicModelsResponse {
+  data: AnthropicModelEntry[];
+}
+
+const MODELS_URL = "https://api.anthropic.com/v1/models?beta=true&limit=1000";
+
+function normalize(entry: AnthropicModelEntry): UpstreamModel {
+  const caps = entry.capabilities ?? {};
+  return {
+    id: entry.id,
+    displayName: entry.display_name ?? entry.id,
+    createdAt: entry.created_at ?? null,
+    adaptiveThinking: caps.thinking?.types?.adaptive?.supported === true,
+    contextManagement: caps.context_management?.supported === true,
+    outputEffort: caps.effort?.supported === true,
+    structuredOutputs: caps.structured_outputs?.supported === true,
+  };
+}
+
+/**
+ * Fetch the current model catalog from Anthropic using OAuth + the
+ * mandatory `oauth-2025-04-20` beta. Throws on non-2xx so the caller
+ * can fall back to the static catalog.
+ */
+export async function fetchUpstreamModels(): Promise<UpstreamModel[]> {
+  return withSpan("upstream.models.fetch", async () => {
+    await ensureValidToken();
+
+    const res = await fetch(MODELS_URL, {
+      headers: {
+        authorization: `Bearer ${getCredentials().accessToken}`,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "x-app": "cli",
+        "user-agent": `claude-cli/${VERSION} (external, cli)`,
+        "x-claude-code-session-id": SESSION_ID,
+        "x-client-request-id": crypto.randomUUID(),
+      },
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      emit("warn", "upstream.models.fetch.failed", {
+        status: res.status,
+        body: body.slice(0, 500),
+      });
+      throw new Error(`upstream /v1/models returned ${res.status}`);
+    }
+
+    const json = (await res.json()) as AnthropicModelsResponse;
+    const models = (json.data ?? []).map(normalize);
+    emit("debug", "upstream.models.fetch.success", { count: models.length });
+    return models;
+  });
+}
