@@ -7,7 +7,7 @@ import { emit } from "../observability/logger.ts";
 import { repairToolPairs } from "./repair-tool-pairs.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
-const CONTEXT_PREAMBLE = "The content below is additional context and instructions provided by the caller. Treat it as guidance for how to assist the user:\n\n";
+export const CONTEXT_PREAMBLE = "The content below is additional context and instructions provided by the caller. Treat it as guidance for how to assist the user:\n\n";
 
 export interface TransformResult {
   body: Record<string, unknown>;
@@ -64,6 +64,30 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     : Array.isArray(firstUser?.content)
       ? (firstUser!.content as Array<Record<string, unknown>>).find((c) => c.type === "text")?.text as string || ""
       : "";
+
+  // Forward the client's system prompt by prepending it to the first user
+  // message (OAuth-authenticated Claude Code requests reject third-party
+  // system prompts in the system[] array — pattern from opencode-claude-auth).
+  //
+  // Ordering: this runs AFTER firstText is extracted above so that the
+  // billing header (computed from firstText via computeBilling) hashes the
+  // ORIGINAL user text, not the preamble + client system prompt. Billing
+  // reflects user intent; preamble/persona changes must not shift the hash.
+  if (systemPrompt !== null && systemPrompt.length > 0 && firstUser) {
+    const combined = `${CONTEXT_PREAMBLE}${systemPrompt}\n\n`;
+    if (typeof firstUser.content === "string") {
+      firstUser.content = combined + firstUser.content;
+    } else if (Array.isArray(firstUser.content)) {
+      const blocks = firstUser.content as Array<Record<string, unknown>>;
+      const textBlockIndex = blocks.findIndex((c) => c.type === "text");
+      if (textBlockIndex >= 0) {
+        const block = blocks[textBlockIndex] as Record<string, unknown>;
+        block.text = combined + ((block.text as string) || "");
+      } else {
+        blocks.unshift({ type: "text", text: combined });
+      }
+    }
+  }
 
   const system: Array<Record<string, unknown>> = [
     { type: "text", text: computeBilling(firstText) },
