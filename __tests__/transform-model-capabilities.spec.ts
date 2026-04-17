@@ -244,6 +244,39 @@ describe("openaiToAnthropic — effort variants", () => {
     expect(body.output_config).toEqual({ effort: "high" });
   });
 
+  // --- Body → options.reasoning_effort (AI SDK v4 / OpenCode convention) ---
+  //
+  // Vercel's @ai-sdk/openai-compatible nests provider params under `options`.
+  // OpenCode sends { ..., options: { reasoning_effort: "max" } }. Without
+  // this path the user selector :max silently does nothing.
+  test("options.reasoning_effort=max (AI SDK nested) → output_config.effort=max", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      options: { reasoning_effort: "max" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "max" });
+  });
+
+  test("options.effort=low (AI SDK alt) → output_config.effort=low", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      options: { effort: "low" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "low" });
+  });
+
+  test("top-level reasoning_effort wins over nested options.reasoning_effort", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      reasoning_effort: "high",
+      options: { reasoning_effort: "low" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "high" });
+  });
+
   test("output_config.effort=max in body (Anthropic dialect) → kept", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-6",

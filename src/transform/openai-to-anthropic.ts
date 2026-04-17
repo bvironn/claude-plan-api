@@ -225,9 +225,16 @@ function addCacheControlToLastUserText(messages: AnthropicMessage[]): void {
  * output_config.effort entirely" (Anthropic will use its own default).
  *
  * Inputs checked, in precedence order:
- *   1. body.reasoning_effort            (OpenAI dialect)
- *   2. body.output_config.effort        (Anthropic-native dialect)
- *   3. Suffix parsed from the model id  (":high" style)
+ *   1. body.reasoning_effort                    (OpenAI dialect, top-level)
+ *   2. body.options.reasoning_effort            (AI SDK v4 / OpenCode nested convention)
+ *   3. body.options.effort                      (AI SDK alt)
+ *   4. body.output_config.effort                (Anthropic-native dialect)
+ *   5. Suffix parsed from the model id          (":high" style)
+ *
+ * Why body.options.* matters: Vercel's @ai-sdk/openai-compatible (used by
+ * OpenCode and some Cline forks) places provider-specific params INSIDE a
+ * nested `options` object rather than at the top level. Without this read
+ * the effort selected by the user silently never reaches the upstream.
  *
  * Validation rules:
  *   - "default" → always returns null (omit).
@@ -242,9 +249,13 @@ function resolveEffort(
   model: string,
   suffixEffort: string | null,
 ): string | null {
+  const options = body.options as Record<string, unknown> | undefined;
+  const outputConfig = body.output_config as Record<string, unknown> | undefined;
   const bodyEffortRaw =
     (body.reasoning_effort as string | undefined) ??
-    ((body.output_config as Record<string, unknown> | undefined)?.effort as string | undefined);
+    (options?.reasoning_effort as string | undefined) ??
+    (options?.effort as string | undefined) ??
+    (outputConfig?.effort as string | undefined);
 
   const requested = bodyEffortRaw ?? suffixEffort;
   if (requested == null) return null;
