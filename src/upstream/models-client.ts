@@ -23,13 +23,24 @@ export interface UpstreamModel {
   contextManagement: boolean;
   outputEffort: boolean;
   structuredOutputs: boolean;
+  /** Effort levels declared supported by the upstream for this model. Empty when outputEffort is false. */
+  effortLevels: string[];
+}
+
+interface AnthropicSupportedFlag { supported?: boolean }
+
+interface AnthropicEffortCapability {
+  supported?: boolean;
+  // Per-level support flags. Anthropic uses arbitrary keys (low, medium,
+  // high, max today; more tomorrow). Each value is { supported: boolean }.
+  [level: string]: AnthropicSupportedFlag | boolean | undefined;
 }
 
 interface AnthropicModelCapabilities {
-  thinking?: { types?: { adaptive?: { supported?: boolean } } };
-  context_management?: { supported?: boolean };
-  effort?: { supported?: boolean };
-  structured_outputs?: { supported?: boolean };
+  thinking?: { types?: { adaptive?: AnthropicSupportedFlag } };
+  context_management?: AnthropicSupportedFlag;
+  effort?: AnthropicEffortCapability;
+  structured_outputs?: AnthropicSupportedFlag;
 }
 
 interface AnthropicModelEntry {
@@ -45,6 +56,19 @@ interface AnthropicModelsResponse {
 
 const MODELS_URL = "https://api.anthropic.com/v1/models?beta=true&limit=1000";
 
+function extractEffortLevels(effort: AnthropicEffortCapability | undefined): string[] {
+  if (!effort || effort.supported !== true) return [];
+  const levels: string[] = [];
+  for (const [key, value] of Object.entries(effort)) {
+    if (key === "supported") continue;
+    // Each level entry looks like { supported: true } — ignore anything else.
+    if (value && typeof value === "object" && (value as AnthropicSupportedFlag).supported === true) {
+      levels.push(key);
+    }
+  }
+  return levels;
+}
+
 function normalize(entry: AnthropicModelEntry): UpstreamModel {
   const caps = entry.capabilities ?? {};
   return {
@@ -55,6 +79,7 @@ function normalize(entry: AnthropicModelEntry): UpstreamModel {
     contextManagement: caps.context_management?.supported === true,
     outputEffort: caps.effort?.supported === true,
     structuredOutputs: caps.structured_outputs?.supported === true,
+    effortLevels: extractEffortLevels(caps.effort),
   };
 }
 

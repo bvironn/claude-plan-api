@@ -31,23 +31,32 @@ export interface ModelCapabilities {
 
 const FALLBACK_MODELS: readonly UpstreamModel[] = [
   { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", createdAt: null,
-    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true },
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
+    effortLevels: ["low", "medium", "high", "max"] },
   { id: "claude-opus-4-6", displayName: "Claude Opus 4.6", createdAt: null,
-    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true },
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
+    effortLevels: ["low", "medium", "high", "max"] },
   { id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
   { id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
   { id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
   { id: "claude-opus-4-1-20250805", displayName: "Claude Opus 4.1", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
   { id: "claude-opus-4-20250514", displayName: "Claude Opus 4", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
   { id: "claude-sonnet-4-20250514", displayName: "Claude Sonnet 4", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
   { id: "claude-3-haiku-20240307", displayName: "Claude 3 Haiku", createdAt: null,
-    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false },
+    adaptiveThinking: false, contextManagement: false, outputEffort: false, structuredOutputs: false,
+    effortLevels: [] },
 ];
 
 const DEFAULT_CAPABILITIES: ModelCapabilities = {
@@ -136,6 +145,60 @@ export function getModelCapabilities(model: string): ModelCapabilities {
     contextManagement: entry.contextManagement,
     outputEffort: entry.outputEffort,
   };
+}
+
+/**
+ * Effort levels declared by the upstream for this model. Empty array means
+ * the model does not support the effort parameter at all.
+ */
+export function getEffortLevels(model: string): readonly string[] {
+  const entry = indexById(currentCatalog()).get(model);
+  return entry?.effortLevels ?? [];
+}
+
+/**
+ * Parse a client-supplied model string that may carry an effort suffix
+ * (e.g. "claude-opus-4-6:high") and split it into the base id + level.
+ *
+ * Separator is ":" — the OpenRouter convention, widely accepted by Cline,
+ * Roo, Cursor, Continue. We do NOT accept "-" as a separator because it
+ * collides with real model ids (e.g. claude-sonnet-4-5-20250929 ends in
+ * -20250929 which looks like a variant suffix but isn't).
+ *
+ * Returns the base model (after resolveModel) and the effort level IF:
+ *   1. The suffix is present.
+ *   2. The level appears in the base model's effortLevels.
+ *
+ * If the suffix is present but invalid for that model, the effort is
+ * dropped and a log emitted. Callers still get a usable base model.
+ */
+export interface ResolvedVariant {
+  id: string;
+  effort: string | null;
+}
+
+export function resolveModelVariant(input: string): ResolvedVariant {
+  const colonIdx = input.lastIndexOf(":");
+  if (colonIdx === -1) {
+    return { id: resolveModel(input), effort: null };
+  }
+
+  const baseInput = input.slice(0, colonIdx);
+  const suffix = input.slice(colonIdx + 1).toLowerCase();
+  const resolvedId = resolveModel(baseInput);
+  const levels = getEffortLevels(resolvedId);
+
+  if (levels.includes(suffix)) {
+    return { id: resolvedId, effort: suffix };
+  }
+
+  emit("warn", "models.variant.unsupported_level", {
+    input,
+    resolved: resolvedId,
+    requestedLevel: suffix,
+    supportedLevels: [...levels],
+  });
+  return { id: resolvedId, effort: null };
 }
 
 /**

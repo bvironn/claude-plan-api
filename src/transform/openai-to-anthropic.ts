@@ -1,6 +1,6 @@
 import type { AnthropicMessage } from "../types.ts";
 import { resetDynamicMap, mapToolName } from "../domain/tool-mapping.ts";
-import { resolveModel, getModelCapabilities } from "../domain/models.ts";
+import { resolveModelVariant, getModelCapabilities, getEffortLevels } from "../domain/models.ts";
 import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
 import { emit } from "../observability/logger.ts";
@@ -16,8 +16,20 @@ export interface TransformResult {
 
 export function openaiToAnthropic(body: Record<string, unknown>): TransformResult {
   resetDynamicMap();
-  const model = resolveModel(body.model as string || "sonnet");
+  const { id: model, effort: suffixEffort } = resolveModelVariant(
+    (body.model as string) || "sonnet",
+  );
   const isHaiku = model.includes("haiku");
+
+  // Resolve the final effort level. Precedence: body > suffix > none.
+  //   - body.reasoning_effort: OpenAI-dialect (Cline, Roo, Cursor).
+  //   - body.output_config.effort: Anthropic-native (OpenCode, direct SDK).
+  //   - ":<level>" suffix in the model id: OpenRouter-style variant.
+  // "default" is a universal sentinel that means "omit effort, let the
+  // provider pick"; any value not in the model's declared effortLevels
+  // is dropped with a warn log (NOT silently mapped — upstream is the
+  // source of truth).
+  const effectiveEffort = resolveEffort(body, model, suffixEffort);
 
   const respFormat = body.response_format as Record<string, unknown> | undefined;
   const isStructuredOutput = respFormat?.type === "json_schema";
@@ -127,8 +139,8 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
       edits: [{ type: "clear_thinking_20251015", keep: "all" }],
     };
   }
-  if (caps.outputEffort && !isStructuredOutput) {
-    result.output_config = { effort: "medium" };
+  if (caps.outputEffort && !isStructuredOutput && effectiveEffort !== null) {
+    result.output_config = { effort: effectiveEffort };
   }
 
   if (isStructuredOutput) {
@@ -188,4 +200,59 @@ function addCacheControlToLastUserText(messages: AnthropicMessage[]): void {
     }
     return;
   }
+}
+
+/**
+ * Decide the effort value to send upstream. Returns null to mean "omit
+ * output_config.effort entirely" (Anthropic will use its own default).
+ *
+ * Inputs checked, in precedence order:
+ *   1. body.reasoning_effort            (OpenAI dialect)
+ *   2. body.output_config.effort        (Anthropic-native dialect)
+ *   3. Suffix parsed from the model id  (":high" style)
+ *
+ * Validation rules:
+ *   - "default" → always returns null (omit).
+ *   - Any value NOT in the model's declared effortLevels returns null and
+ *     emits a warn. We do not invent mappings like xhigh→max — upstream
+ *     is the source of truth, so invalid values are dropped.
+ *   - If the resolved model does not support effort at all, returns null
+ *     regardless of what the caller asked for.
+ */
+function resolveEffort(
+  body: Record<string, unknown>,
+  model: string,
+  suffixEffort: string | null,
+): string | null {
+  const bodyEffortRaw =
+    (body.reasoning_effort as string | undefined) ??
+    ((body.output_config as Record<string, unknown> | undefined)?.effort as string | undefined);
+
+  const requested = bodyEffortRaw ?? suffixEffort;
+  if (requested == null) return null;
+
+  if (bodyEffortRaw && suffixEffort && bodyEffortRaw !== suffixEffort) {
+    emit("warn", "models.variant.effort_conflict", {
+      model,
+      fromBody: bodyEffortRaw,
+      fromSuffix: suffixEffort,
+      chose: "body",
+    });
+  }
+
+  const normalized = requested.toLowerCase();
+  if (normalized === "default") return null;
+
+  const supported = getEffortLevels(model);
+  if (!supported.includes(normalized)) {
+    emit("warn", "models.variant.effort_dropped", {
+      model,
+      requested: normalized,
+      supported: [...supported],
+      reason: supported.length === 0 ? "model_does_not_support_effort" : "level_not_declared",
+    });
+    return null;
+  }
+
+  return normalized;
 }

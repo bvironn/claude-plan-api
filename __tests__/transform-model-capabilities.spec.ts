@@ -12,15 +12,20 @@ import type { UpstreamModel } from "../src/upstream/models-client.ts";
 // families that don't, legacy models, and a minimal / unknown model.
 const SEEDED_REGISTRY: UpstreamModel[] = [
   { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", createdAt: null,
-    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true },
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
+    effortLevels: ["low", "medium", "high", "max"] },
   { id: "claude-opus-4-6", displayName: "Claude Opus 4.6", createdAt: null,
-    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true },
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true,
+    effortLevels: ["low", "medium", "high", "max"] },
   { id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true },
+    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true,
+    effortLevels: [] },
   { id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: true, outputEffort: true, structuredOutputs: true },
+    adaptiveThinking: false, contextManagement: true, outputEffort: true, structuredOutputs: true,
+    effortLevels: ["low", "medium", "high"] }, // deliberately no "max" — mirrors real upstream
   { id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5", createdAt: null,
-    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true },
+    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true,
+    effortLevels: [] },
   // A model intentionally left out: "totally-unknown-model-9000" → default all-false.
 ];
 
@@ -93,13 +98,14 @@ describe("openaiToAnthropic — model capability gating", () => {
     }
   });
 
-  // Positive counterpart for output effort
-  test("REQ-4b: claude-sonnet-4-6 gets output_config.effort = medium", () => {
+  // When no effort is supplied by the caller, we do NOT force one —
+  // omitting output_config.effort lets Anthropic use its own default.
+  test("REQ-4b: capable model with no effort in body omits output_config entirely", () => {
     const { body } = openaiToAnthropic({
       model: "claude-sonnet-4-6",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "medium" });
+    expect(body.output_config).toBeUndefined();
   });
 
   // --- REQ-4: Structured output bypass — all three features suppressed ---
@@ -180,5 +186,128 @@ describe("openaiToAnthropic — model capability gating", () => {
       messages: [{ role: "user", content: "production regression" }],
     });
     expect(body.thinking).toBeUndefined();
+  });
+});
+
+describe("openaiToAnthropic — effort variants", () => {
+  // --- Body → output_config.effort (OpenAI dialect) ---
+  test("reasoning_effort=high in body → output_config.effort=high", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      reasoning_effort: "high",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "high" });
+  });
+
+  test("output_config.effort=max in body (Anthropic dialect) → kept", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-opus-4-6",
+      output_config: { effort: "max" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "max" });
+  });
+
+  // --- Suffix → output_config.effort (OpenRouter dialect) ---
+  test("model id with :high suffix → effort=high, base id resolved", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-opus-4-6:high",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "high" });
+    expect(body.model).toBe("claude-opus-4-6"); // suffix stripped
+  });
+
+  test("model id with :max suffix on model that supports max → kept", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6:max",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "max" });
+  });
+
+  // --- Precedence: body wins over suffix ---
+  test("body effort overrides suffix effort when both present", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-opus-4-6:low",
+      reasoning_effort: "max",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "max" });
+  });
+
+  // --- "default" sentinel → omit effort ---
+  test("reasoning_effort=default → output_config omitted", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      reasoning_effort: "default",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toBeUndefined();
+  });
+
+  // --- Non-native values dropped (not mapped) ---
+  test("reasoning_effort=xhigh → dropped, output_config omitted (no silent mapping)", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      reasoning_effort: "xhigh",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    // xhigh is NOT declared by Anthropic; we drop it rather than invent a mapping to max.
+    expect(body.output_config).toBeUndefined();
+  });
+
+  // --- Per-model level validation: Opus 4.5 does NOT support max ---
+  test("claude-opus-4-5 with effort=max → dropped (upstream declares only low/medium/high)", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-opus-4-5-20251101",
+      reasoning_effort: "max",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toBeUndefined();
+  });
+
+  test("claude-opus-4-5 with effort=high → accepted (declared)", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-opus-4-5-20251101",
+      reasoning_effort: "high",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toEqual({ effort: "high" });
+  });
+
+  // --- Model without effort capability: any value dropped ---
+  test("claude-haiku with reasoning_effort=high → dropped (model has no effort cap)", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-haiku-4-5-20251001",
+      reasoning_effort: "high",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toBeUndefined();
+  });
+
+  test("claude-haiku:high suffix → suffix ignored (haiku has no effort)", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-haiku-4-5-20251001:high",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(body.output_config).toBeUndefined();
+  });
+
+  // --- Structured output still wins — effort never leaks into structured-output shape ---
+  test("structured_output + reasoning_effort=high → effort dropped, format kept", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-6",
+      reasoning_effort: "high",
+      response_format: {
+        type: "json_schema",
+        json_schema: { schema: { type: "object", properties: {} } },
+      },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const outputConfig = body.output_config as Record<string, unknown>;
+    expect(outputConfig.effort).toBeUndefined();
+    expect(outputConfig.format).toBeDefined();
   });
 });
