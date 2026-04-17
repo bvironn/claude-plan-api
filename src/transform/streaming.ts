@@ -49,6 +49,63 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
     async start(controller) {
       emit("info", "stream.start", { model });
       reader = anthropicStream.getReader();
+
+      // Single source of truth for per-event processing. Used by the main loop
+      // AND by the end-of-stream flush block so residual bytes never diverge in
+      // behavior from mid-stream parsing. Returns "break" to signal the caller
+      // must exit its line loop (e.g., on safeEnqueue failure when controller
+      // is already closed); "continue" otherwise.
+      const processEvent = (json: string): "break" | "continue" => {
+        if (!json || json === "[DONE]") return "continue";
+        try {
+          const event = JSON.parse(json);
+          if (event.type === "message_start") {
+            if (event.message?.id) msgId = event.message.id;
+            if (event.message?.usage) {
+              usage.input_tokens = event.message.usage.input_tokens || 0;
+              usage.cache_read_input_tokens = event.message.usage.cache_read_input_tokens || 0;
+              usage.cache_creation_input_tokens = event.message.usage.cache_creation_input_tokens || 0;
+            }
+          } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+            toolIndex++;
+            inToolUse = true;
+            toolUseBlockIndex = typeof event.index === "number" ? event.index : null;
+            const name = unmapToolName(event.content_block.name);
+            if (!safeEnqueue(controller, chunk({
+              id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+              choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: event.content_block.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
+            }))) return "break";
+            sentRole = true;
+          } else if (event.type === "content_block_stop") {
+            if (toolUseBlockIndex !== null && event.index === toolUseBlockIndex) {
+              inToolUse = false;
+              toolUseBlockIndex = null;
+            }
+          } else if (event.type === "content_block_delta") {
+            if (event.delta?.type === "input_json_delta" && event.delta.partial_json) {
+              if (!safeEnqueue(controller, chunk({
+                id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, function: { arguments: event.delta.partial_json } }] }, finish_reason: null }],
+              }))) return "break";
+            } else if (event.delta?.text) {
+              if (!safeEnqueue(controller, chunk({
+                id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), content: event.delta.text }, finish_reason: null }],
+              }))) return "break";
+              sentRole = true;
+            }
+          } else if (event.type === "message_delta") {
+            if (event.usage) usage.output_tokens = event.usage.output_tokens || 0;
+            if (!safeEnqueue(controller, chunk({
+              id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+              choices: [{ index: 0, delta: {}, finish_reason: stopMap[event.delta?.stop_reason] || "stop" }],
+              usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens, total_tokens: usage.input_tokens + usage.output_tokens },
+            }))) return "break";
+          }
+        } catch {}
+        return "continue";
+      };
+
       try {
         outer: while (!closed) {
           // Timeout safeguard for deferred cancel
@@ -74,53 +131,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
           for (const line of lines) {
             if (!line.startsWith("data: ")) continue;
             const json = line.slice(6).trim();
-            if (!json || json === "[DONE]") continue;
-            try {
-              const event = JSON.parse(json);
-              if (event.type === "message_start") {
-                if (event.message?.id) msgId = event.message.id;
-                if (event.message?.usage) {
-                  usage.input_tokens = event.message.usage.input_tokens || 0;
-                  usage.cache_read_input_tokens = event.message.usage.cache_read_input_tokens || 0;
-                  usage.cache_creation_input_tokens = event.message.usage.cache_creation_input_tokens || 0;
-                }
-              } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
-                toolIndex++;
-                inToolUse = true;
-                toolUseBlockIndex = typeof event.index === "number" ? event.index : null;
-                const name = unmapToolName(event.content_block.name);
-                if (!safeEnqueue(controller, chunk({
-                  id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-                  choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: event.content_block.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
-                }))) break outer;
-                sentRole = true;
-              } else if (event.type === "content_block_stop") {
-                if (toolUseBlockIndex !== null && event.index === toolUseBlockIndex) {
-                  inToolUse = false;
-                  toolUseBlockIndex = null;
-                }
-              } else if (event.type === "content_block_delta") {
-                if (event.delta?.type === "input_json_delta" && event.delta.partial_json) {
-                  if (!safeEnqueue(controller, chunk({
-                    id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, function: { arguments: event.delta.partial_json } }] }, finish_reason: null }],
-                  }))) break outer;
-                } else if (event.delta?.text) {
-                  if (!safeEnqueue(controller, chunk({
-                    id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-                    choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), content: event.delta.text }, finish_reason: null }],
-                  }))) break outer;
-                  sentRole = true;
-                }
-              } else if (event.type === "message_delta") {
-                if (event.usage) usage.output_tokens = event.usage.output_tokens || 0;
-                if (!safeEnqueue(controller, chunk({
-                  id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-                  choices: [{ index: 0, delta: {}, finish_reason: stopMap[event.delta?.stop_reason] || "stop" }],
-                  usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens, total_tokens: usage.input_tokens + usage.output_tokens },
-                }))) break outer;
-              }
-            } catch {}
+            if (processEvent(json) === "break") break outer;
 
             // After each event: if a deferred cancel is pending and the tool_use block just closed,
             // force-close now — we captured the full JSON for telemetry.
@@ -132,6 +143,29 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
             }
           }
         }
+
+        // End-of-stream flush: drain any bytes held by the TextDecoder (e.g. the
+        // trailing byte of a multi-byte UTF-8 char) AND any residual line left in
+        // `buffer` that the main loop intentionally retained via `lines.pop()`.
+        // Without this, a terminal `message_delta` emitted by upstream without a
+        // final `\n\n` is silently dropped, corrupting usage and finish_reason.
+        //
+        // Guarded by `!closed` so cancel / timeout / defer-force-close paths skip
+        // the flush — they MUST NOT re-emit chunks after the stream has been
+        // force-closed on those paths.
+        if (!closed) {
+          buffer += decoder.decode();
+          if (buffer.length > 0) {
+            const tailLines = buffer.split("\n");
+            buffer = "";
+            for (const line of tailLines) {
+              if (!line.startsWith("data: ")) continue;
+              const json = line.slice(6).trim();
+              if (processEvent(json) === "break") break;
+            }
+          }
+        }
+
         if (!closed) {
           safeEnqueue(controller, "data: [DONE]\n\n");
           try { controller.close(); } catch {}
