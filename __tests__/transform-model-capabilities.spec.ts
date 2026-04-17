@@ -47,19 +47,27 @@ const SEEDED_REGISTRY: UpstreamModel[] = [
     effortLevels: ["low", "medium", "high", "max"],
     contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015", "compact_20260112"],
     imageInput: true, pdfInput: true, citations: true, codeExecution: true, batch: true }),
+  // Sonnet 4.5, Opus 4.5, Haiku all have thinking=enabled (not adaptive).
+  // Upstream declares clear_thinking_20251015 as "supported" for these, but
+  // runtime rejects it unless the body carries active thinking — which the
+  // proxy only injects for adaptive models. So seeds mirror upstream's
+  // declaration AND tests assert the filtered selection.
   seedModel({ id: "claude-sonnet-4-5-20250929", displayName: "Claude Sonnet 4.5",
     maxInputTokens: 200_000, maxOutputTokens: 64_000,
-    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true,
+    adaptiveThinking: false, thinkingEnabled: true,
+    contextManagement: true, outputEffort: false, structuredOutputs: true,
     contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015"] }),
   seedModel({ id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5",
     maxInputTokens: 200_000, maxOutputTokens: 64_000,
-    adaptiveThinking: false, contextManagement: true, outputEffort: true, structuredOutputs: true,
+    adaptiveThinking: false, thinkingEnabled: true,
+    contextManagement: true, outputEffort: true, structuredOutputs: true,
     effortLevels: ["low", "medium", "high"],
     contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015"] }),
   seedModel({ id: "claude-haiku-4-5-20251001", displayName: "Claude Haiku 4.5",
     maxInputTokens: 200_000, maxOutputTokens: 32_000,
-    adaptiveThinking: false, contextManagement: true, outputEffort: false, structuredOutputs: true,
-    contextManagementEdits: ["clear_tool_uses_20250919"] }), // only one edit — tests fallback
+    adaptiveThinking: false, thinkingEnabled: true,
+    contextManagement: true, outputEffort: false, structuredOutputs: true,
+    contextManagementEdits: ["clear_tool_uses_20250919", "clear_thinking_20251015"] }),
 ];
 
 let restore: (() => void) | null = null;
@@ -95,14 +103,18 @@ describe("openaiToAnthropic — model capability gating", () => {
   //
   // Historical note: before migrating to upstream-as-truth, the proxy
   // assumed claude-opus-4-5 did NOT support context_management. The real
-  // /v1/models response declares it supported, so we now send it.
-  test("REQ-3: claude-opus-4-5-20251101 DOES get context_management per upstream", () => {
+  // /v1/models response declares it supported, so we now send it. The
+  // chosen edit is clear_tool_uses_20250919 (not clear_thinking_*) because
+  // Opus 4.5 only has thinking=enabled, and the proxy doesn't inject an
+  // explicit thinking trigger for enabled-only models — so clear_thinking
+  // would 400 at runtime. See pickContextManagementEdit for the filter.
+  test("REQ-3: claude-opus-4-5-20251101 DOES get context_management with clear_tool_uses (not clear_thinking)", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-5-20251101",
       messages: [{ role: "user", content: "hi" }],
     });
     expect(body.context_management).toEqual({
-      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
+      edits: [{ type: "clear_tool_uses_20250919", keep: "all" }],
     });
   });
 
@@ -402,20 +414,65 @@ describe("context-management edit selection (from upstream)", () => {
     expect(pickContextManagementEdit("claude-sonnet-4-6")).toBe("clear_thinking_20251015");
   });
 
-  test("pickContextManagementEdit falls back to newest edit when clear_thinking absent", () => {
-    // Haiku seed has only clear_tool_uses_20250919.
+  // --- REGRESSION: the production 400 that motivated the fix ---
+  //
+  // Before the fix, pickContextManagementEdit returned clear_thinking_20251015
+  // for every model that declared it supported — including Haiku, which only
+  // has thinking=enabled (not adaptive). The proxy doesn't auto-inject
+  // thinking for enabled-only models, so Anthropic rejected the request:
+  //   "clear_thinking_20251015 strategy requires thinking to be enabled or adaptive"
+  //
+  // The fix: filter clear_thinking_* when adaptiveThinking is false.
+  test("REGRESSION: haiku with clear_thinking declared falls back to clear_tool_uses (runtime 400 prevented)", () => {
+    // Haiku seed now mirrors the real upstream: it declares BOTH
+    // clear_tool_uses_20250919 AND clear_thinking_20251015 as supported.
+    // But haiku has adaptiveThinking=false (only thinking.enabled), so the
+    // proxy must pick clear_tool_uses — never clear_thinking.
     expect(pickContextManagementEdit("claude-haiku-4-5-20251001")).toBe("clear_tool_uses_20250919");
   });
 
+  test("REGRESSION: transform for haiku emits clear_tool_uses context_management, never clear_thinking", () => {
+    const { body } = openaiToAnthropic({
+      model: "claude-haiku-4-5-20251001",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    // When present, the edit must be clear_tool_uses (never clear_thinking).
+    if (body.context_management) {
+      const cm = body.context_management as { edits: Array<{ type: string }> };
+      for (const edit of cm.edits) {
+        expect(edit.type.startsWith("clear_thinking_")).toBe(false);
+      }
+      expect(cm.edits[0]!.type).toBe("clear_tool_uses_20250919");
+    }
+  });
+
   test("pickContextManagementEdit returns null when no edits declared", () => {
-    expect(pickContextManagementEdit("claude-sonnet-4-5-20250929")).toBe("clear_thinking_20251015"); // has clear_thinking
-    // A model with no edits at all:
+    // Sonnet 4.5 declares both clear_tool_uses and clear_thinking, but
+    // has only thinking.enabled (not adaptive), so clear_thinking is
+    // filtered out. Result: clear_tool_uses_20250919.
+    expect(pickContextManagementEdit("claude-sonnet-4-5-20250929")).toBe("clear_tool_uses_20250919");
+    // A model with no edits at all → null.
     const undo = __seedRegistryForTests([
       seedModel({ id: "no-ctx-model", displayName: "no ctx",
         contextManagement: false, contextManagementEdits: [] }),
     ]);
     try {
       expect(pickContextManagementEdit("no-ctx-model")).toBeNull();
+    } finally {
+      undo();
+    }
+  });
+
+  test("pickContextManagementEdit returns null when ALL declared edits need thinking and model has none", () => {
+    // Pathological model: declares only clear_thinking_20251015 and has
+    // no thinking capability. Every edit gets filtered — safe null.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "thinking-less-model", displayName: "no thinking",
+        contextManagement: true,
+        contextManagementEdits: ["clear_thinking_20251015"] }),
+    ]);
+    try {
+      expect(pickContextManagementEdit("thinking-less-model")).toBeNull();
     } finally {
       undo();
     }

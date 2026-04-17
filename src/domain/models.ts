@@ -32,7 +32,20 @@ export interface ModelCapabilities {
 // Static fallback when the upstream is unreachable. Token limits, extended
 // capabilities, and context-management edits are left at conservative
 // null/false values. The live registry (once populated) fully overrides these.
+//
+// For contextManagementEdits we mirror what the real upstream declares:
+// models with adaptive thinking get the full 3-edit set (tool_uses +
+// thinking + compact); models without adaptive get only tool_uses so we
+// never accidentally pick clear_thinking_* here (runtime would 400 — see
+// pickContextManagementEdit).
 function makeFallback(partial: Pick<UpstreamModel, "id" | "displayName" | "adaptiveThinking" | "contextManagement" | "outputEffort" | "structuredOutputs"> & Partial<UpstreamModel>): UpstreamModel {
+  const hasCtx = partial.contextManagement;
+  const hasAdaptive = partial.adaptiveThinking;
+  const fallbackEdits = !hasCtx
+    ? []
+    : hasAdaptive
+      ? ["clear_tool_uses_20250919", "clear_thinking_20251015", "compact_20260112"]
+      : ["clear_tool_uses_20250919"];
   return {
     createdAt: null,
     maxInputTokens: null,
@@ -44,7 +57,7 @@ function makeFallback(partial: Pick<UpstreamModel, "id" | "displayName" | "adapt
     codeExecution: false,
     batch: false,
     effortLevels: partial.outputEffort ? ["low", "medium", "high", "max"] : [],
-    contextManagementEdits: partial.contextManagement ? ["clear_thinking_20251015"] : [],
+    contextManagementEdits: fallbackEdits,
     ...partial,
   };
 }
@@ -202,20 +215,42 @@ export function getContextManagementEdits(model: string): readonly string[] {
 /**
  * Pick the best context-management edit type to apply for this model.
  *
- * Preference order:
- *   1. clear_thinking_20251015 — what the proxy historically used; keeps
- *      behaviour stable for the 4-6+ models that are the main targets.
- *   2. The newest (by YYYYMMDD suffix) edit the model declares, as a
- *      forward-compat fallback when (1) is not available.
+ * Gotcha discovered the hard way: Anthropic's upstream declares
+ * clear_thinking_20251015 as "supported" for models that only have
+ * thinking.types.enabled (haiku, opus-4-5, sonnet-4-5, older). But at
+ * RUNTIME the same upstream rejects the edit with
+ *   "clear_thinking_20251015 strategy requires thinking to be enabled
+ *    or adaptive"
+ * unless the request body carries an active `thinking` field.
  *
- * Returns null when the model declares no edits.
+ * Our transform only auto-injects `thinking: { type: "adaptive" }` for
+ * models that declare adaptive thinking. Models with only `enabled`
+ * would need the caller to supply thinking explicitly — we don't do
+ * that, so clear_thinking_* is UNSAFE for those models.
+ *
+ * Filter rule: drop clear_thinking_* edits when the model lacks
+ * adaptiveThinking. Then prefer clear_thinking_20251015 (when allowed)
+ * for back-compat, else the newest dated edit.
+ *
+ * Returns null when no valid edit remains.
  */
 export function pickContextManagementEdit(model: string): string | null {
-  const edits = getContextManagementEdits(model);
-  if (edits.length === 0) return null;
-  if (edits.includes("clear_thinking_20251015")) return "clear_thinking_20251015";
-  // Pick the edit with the greatest date suffix we can parse.
-  const sorted = [...edits].sort((a, b) => {
+  const entry = indexById(currentCatalog()).get(model);
+  if (!entry || entry.contextManagementEdits.length === 0) return null;
+
+  const allowClearThinking = entry.adaptiveThinking;
+  const valid = entry.contextManagementEdits.filter((e) => {
+    if (e.startsWith("clear_thinking_") && !allowClearThinking) return false;
+    return true;
+  });
+
+  if (valid.length === 0) return null;
+
+  if (allowClearThinking && valid.includes("clear_thinking_20251015")) {
+    return "clear_thinking_20251015";
+  }
+
+  const sorted = [...valid].sort((a, b) => {
     const da = a.match(/(\d{8})$/)?.[1] ?? "";
     const db = b.match(/(\d{8})$/)?.[1] ?? "";
     return db.localeCompare(da); // descending
