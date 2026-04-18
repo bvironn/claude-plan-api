@@ -5,7 +5,6 @@ import {
   getModelCapabilities,
   getEffortLevels,
   getModelLimits,
-  pickContextManagementEdit,
 } from "../domain/models.ts";
 import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
@@ -203,17 +202,39 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     }
   }
 
-  if (caps.contextManagement && !isStructuredOutput) {
-    // Pick the edit type from the upstream declaration rather than hardcoding.
-    // Future models may drop clear_thinking_20251015 or add new edits; this
-    // keeps us in sync automatically.
-    const edit = pickContextManagementEdit(model);
-    if (edit) {
-      result.context_management = {
-        edits: [{ type: edit, keep: "all" }],
-      };
-    }
-  }
+  // INTENTIONALLY OMITTED: context_management edits in the request body.
+  //
+  // Background: declaring `context_management.edits[].type =
+  // "clear_thinking_20251015"` (even with `keep: "all"`) signals to
+  // Anthropic that this client knows how to consume thinking blocks in
+  // their REDACTED form (empty `thinking` text + signed ciphertext).
+  // Server-side, this appears to flip the streaming pipeline into the
+  // redacted-thinking codepath: the SSE stream emits a `thinking` block
+  // shell with the signature filled in, but ZERO `thinking_delta`
+  // events — i.e. no plaintext chain-of-thought. The audit pipeline
+  // becomes useless.
+  //
+  // Confirmed by comparison with the reference plugin
+  // `~/opencode-claude-auth` — it uses the same OAuth flow, the same
+  // `context-management-2025-06-27` beta header, the same model IDs,
+  // but it NEVER puts `context_management` in the request body. With
+  // that single difference, the plugin obtains real `thinking_delta`
+  // streaming. We mirror that behaviour here.
+  //
+  // What we keep:
+  //   - The `context-management-2025-06-27` beta in the headers
+  //     (matches the plugin) — declares the *capability* without
+  //     opting into the redacted-thinking path.
+  //   - The `pickContextManagementEdit()` helper and the
+  //     `contextManagementEdits` registry field — still surfaced via
+  //     `GET /v1/models` so future explicit clients can opt in if a
+  //     real use case appears.
+  //
+  // If a caller ever needs explicit context-management edits (long
+  // multi-turn agent runs that exceed the window), the right fix is
+  // to expose an opt-in knob on the request, not to inject it by
+  // default. Default behaviour optimises for the audit use-case:
+  // visible thinking, byte-for-byte parity with the plugin.
 
   // Case C: emit output_config.effort only when we did NOT use
   // thinking.enabled. When enabled is active, budget_tokens already

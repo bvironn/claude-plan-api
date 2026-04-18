@@ -101,33 +101,42 @@ describe("openaiToAnthropic — model capability gating", () => {
     expect(body.thinking).toEqual({ type: "adaptive" });
   });
 
-  // --- REQ-2: Context management now tracks upstream truth ---
+  // --- REQ-2: context_management is NOT emitted in the request body ---
   //
-  // Historical note: before migrating to upstream-as-truth, the proxy
-  // assumed claude-opus-4-5 did NOT support context_management. The real
-  // /v1/models response declares it supported, so we now send it. The
-  // chosen edit is clear_tool_uses_20250919 (not clear_thinking_*) because
-  // Opus 4.5 only has thinking=enabled, and the proxy doesn't inject an
-  // explicit thinking trigger for enabled-only models — so clear_thinking
-  // would 400 at runtime. See pickContextManagementEdit for the filter.
-  test("REQ-3: claude-opus-4-5-20251101 DOES get context_management with clear_tool_uses (not clear_thinking)", () => {
+  // Rationale (keep this note — it is non-obvious and high-value):
+  //
+  // Declaring `context_management.edits[].type = "clear_thinking_*"` in
+  // the request body — even with `keep: "all"` (which *logically* means
+  // "preserve everything") — causes Anthropic's OAuth streaming endpoint
+  // to switch into the REDACTED-thinking codepath: the SSE stream emits
+  // a `thinking` block shell with a signed ciphertext but ZERO
+  // `thinking_delta` events. Plaintext chain-of-thought is lost; the
+  // audit pipeline becomes useless for its core purpose.
+  //
+  // The reference plugin `~/opencode-claude-auth` uses the exact same
+  // OAuth flow, same beta header `context-management-2025-06-27`, same
+  // model IDs — but omits `context_management` from the body entirely.
+  // With only that difference, the plugin streams real thinking deltas.
+  // We mirror the plugin.
+  //
+  // The capability is still surfaced via `GET /v1/models`
+  // (`context_management: true`, `context_management_edits: [...]`) so
+  // an explicit caller who opts in can still use it. Default behaviour
+  // optimises for the audit use-case.
+  test("REQ-3: claude-opus-4-5-20251101 does NOT inject context_management by default (preserve thinking plaintext)", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-5-20251101",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.context_management).toEqual({
-      edits: [{ type: "clear_tool_uses_20250919", keep: "all" }],
-    });
+    expect(body.context_management).toBeUndefined();
   });
 
-  test("REQ-3b: claude-opus-4-6 DOES get context_management", () => {
+  test("REQ-3b: claude-opus-4-6 does NOT inject context_management by default (preserve thinking plaintext)", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-6",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.context_management).toEqual({
-      edits: [{ type: "clear_thinking_20251015", keep: "all" }],
-    });
+    expect(body.context_management).toBeUndefined();
   });
 
   // --- REQ-3: Output effort gated off for non-capable models ---
@@ -480,19 +489,17 @@ describe("context-management edit selection (from upstream)", () => {
     expect(pickContextManagementEdit("claude-haiku-4-5-20251001")).toBe("clear_tool_uses_20250919");
   });
 
-  test("REGRESSION: transform for haiku emits clear_tool_uses context_management, never clear_thinking", () => {
+  test("REGRESSION: transform for haiku does NOT inject context_management (transform never emits it by default)", () => {
+    // The original regression test guarded against emitting
+    // `clear_thinking_*` for a model without adaptive thinking (would
+    // 400 at runtime). Post-fix the transform does not emit
+    // `context_management` at all, which is a STRICTER guarantee that
+    // subsumes the old one. Kept as a regression marker.
     const { body } = openaiToAnthropic({
       model: "claude-haiku-4-5-20251001",
       messages: [{ role: "user", content: "hi" }],
     });
-    // When present, the edit must be clear_tool_uses (never clear_thinking).
-    if (body.context_management) {
-      const cm = body.context_management as { edits: Array<{ type: string }> };
-      for (const edit of cm.edits) {
-        expect(edit.type.startsWith("clear_thinking_")).toBe(false);
-      }
-      expect(cm.edits[0]!.type).toBe("clear_tool_uses_20250919");
-    }
+    expect(body.context_management).toBeUndefined();
   });
 
   test("pickContextManagementEdit returns null when no edits declared", () => {
@@ -533,8 +540,13 @@ describe("context-management edit selection (from upstream)", () => {
     );
   });
 
-  test("transform picks newest edit when clear_thinking_20251015 is unsupported", () => {
+  test("transform does not inject context_management even for models declaring only compact edits", () => {
     // Seed a model whose ONLY edit is the newer "compact_20260112".
+    // Even though pickContextManagementEdit() would return it, the
+    // transform intentionally does NOT inject context_management into
+    // the request body — that is what preserves thinking plaintext
+    // streaming for the default path. The registry still exposes the
+    // edit via GET /v1/models for explicit opt-in callers.
     const undo = __seedRegistryForTests([
       seedModel({ id: "only-compact-model", displayName: "only compact",
         contextManagement: true, contextManagementEdits: ["compact_20260112"] }),
@@ -544,9 +556,9 @@ describe("context-management edit selection (from upstream)", () => {
         model: "only-compact-model",
         messages: [{ role: "user", content: "hi" }],
       });
-      expect(body.context_management).toEqual({
-        edits: [{ type: "compact_20260112", keep: "all" }],
-      });
+      expect(body.context_management).toBeUndefined();
+      // But the helper still reports the edit for capability surfaces:
+      expect(pickContextManagementEdit("only-compact-model")).toBe("compact_20260112");
     } finally {
       undo();
     }
