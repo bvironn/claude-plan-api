@@ -104,23 +104,29 @@ export function buildHeaders(
   isStructuredOutput = false,
   excluded?: Set<string>,
 ): Record<string, string> {
+  // Header set aligned with the `opencode-claude-auth` plugin.
+  //
+  // REMOVED (previously present, but the plugin does not send them and
+  // our thinking-plaintext investigation pointed to these as the most
+  // likely reason Anthropic redacts thinking for our traffic):
+  //   - `anthropic-dangerous-direct-browser-access: true` — signals to
+  //     Anthropic that the client is a browser-style consumer; appears
+  //     to trigger safety redactions, including thinking_delta being
+  //     stripped from the stream.
+  //   - All `x-stainless-*` headers — the plugin never sets them;
+  //     they suggest "requests coming from the Anthropic SDK" which
+  //     may also factor into redaction policy.
+  //   - `content-type: application/json` — the fetch polyfill sets it
+  //     automatically when the body is a JSON string, so we don't need
+  //     to duplicate it. (If it becomes necessary we can re-add, but
+  //     the plugin omits it and works.)
   return {
     authorization: `Bearer ${getCredentials().accessToken}`,
     "anthropic-version": "2023-06-01",
     "anthropic-beta": buildBetas(model, isStructuredOutput, excluded),
-    "anthropic-dangerous-direct-browser-access": "true",
     "x-app": "cli",
     "user-agent": `claude-cli/${VERSION} (external, cli)`,
-    "content-type": "application/json",
-    "x-stainless-arch": "x64",
-    "x-stainless-lang": "js",
-    "x-stainless-os": "Linux",
-    "x-stainless-package-version": "0.81.0",
-    "x-stainless-retry-count": "0",
-    "x-stainless-runtime": "node",
-    "x-stainless-runtime-version": "v24.3.0",
-    "x-stainless-timeout": "600",
-    "x-claude-code-session-id": SESSION_ID,
     "x-client-request-id": crypto.randomUUID(),
+    "X-Claude-Code-Session-Id": SESSION_ID,
   };
 }
