@@ -27,26 +27,6 @@ import { parseResponseBody } from "@/lib/sse-parser"
  *     with the client's forwarded prompt as a prefix on the first user msg).
  *   - Response: responseBody (OpenAI shape, since the client sees this).
  */
-/**
- * Returns true iff either (a) reasoning text is non-empty, or (b) at least
- * one reasoning detail has real content (thinking string or redacted data).
- * Filters out the "empty shell" case upstream sometimes emits.
- */
-function hasReasoningContent(
-  text: string | undefined,
-  details: Array<Record<string, unknown>> | undefined,
-): boolean {
-  if (text && text.trim().length > 0) return true
-  if (!details || details.length === 0) return false
-  for (const d of details) {
-    const thinking = d.thinking
-    if (typeof thinking === "string" && thinking.length > 0) return true
-    const data = d.data
-    if (typeof data === "string" && data.length > 0) return true
-  }
-  return false
-}
-
 export function TranscriptView({ record }: { record: RequestRecord }) {
   const { systemBlocks, messages, responseMessage, reasoningText, reasoningDetails } = useMemo(() => {
     const upstream = parseOrNull<AnthropicRequestBody>(record.upstreamRequestBody)
@@ -90,13 +70,13 @@ export function TranscriptView({ record }: { record: RequestRecord }) {
         </Fragment>
       ))}
 
-      {/* Only render the reasoning block if it actually carries signal:
-          non-empty text OR any raw block with real content (thinking string
-          OR redacted_thinking data). Upstream adaptive-thinking often emits
-          a zero-length shell block + signature when it decides not to think —
-          rendering that shows the operator "Reasoning (0 chars)" which is
-          noise. */}
-      {hasReasoningContent(reasoningText, reasoningDetails) && (
+      {/* Render the reasoning block whenever upstream produced ANY thinking
+          artifact — even an empty shell block with just a signature. The
+          operator explicitly asked us NOT to hide this: a zero-char shell
+          is signal in itself (the model opened a thinking block, then chose
+          not to fill it, or the upstream stripped plaintext). Hiding that
+          would mask the behaviour from audit. */}
+      {(reasoningText !== undefined || (reasoningDetails && reasoningDetails.length > 0)) && (
         <ReasoningBlock text={reasoningText ?? ""} details={reasoningDetails} />
       )}
 
