@@ -27,5 +27,11 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src/**/*", "__tests__/**/*", "scripts/**/*"]
+  "include": ["src/**/*", "__tests__/**/*", "scripts/**/*"],
+  "exclude": [
+    "node_modules",
+    // src/ui/ is a separate Vite project with its own tsconfig and DOM lib;
+    // it must not be type-checked by the backend root config.
+    "src/ui"
+  ]
 }

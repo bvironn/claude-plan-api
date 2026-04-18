@@ -12,8 +12,21 @@ import {
   handleTelemetryRequestById,
   handleTelemetryExport,
 } from "./routes/telemetry/index.ts";
+import { serveStatic, serveSpaFallback } from "./static.ts";
 import { withObservability } from "../observability/middleware.ts";
 import { emit } from "../observability/logger.ts";
+
+// Paths whose exact match or prefix is owned by API handlers. GET requests to
+// any other path fall through to the SPA (dist/index.html) so client-side
+// routing works without a per-route server-side handler.
+const API_PREFIXES = ["/api/", "/v1/", "/health", "/assets/"] as const;
+
+function isApiOwned(pathname: string): boolean {
+  for (const p of API_PREFIXES) {
+    if (pathname === p || pathname.startsWith(p)) return true;
+  }
+  return false;
+}
 
 const observedHealth = withObservability(() => Promise.resolve(handleHealth()));
 const observedModels = withObservability(() => Promise.resolve(handleModels()));
@@ -52,6 +65,21 @@ export function startServer() {
         if (method === "GET" && pathname === "/api/telemetry/requests") return await handleTelemetryRequests(req);
         if (method === "GET" && pathname.startsWith("/api/telemetry/requests/")) return await handleTelemetryRequestById(req);
         if (method === "GET" && pathname === "/api/telemetry/export") return await handleTelemetryExport(req);
+
+        // Static asset serving for the built UI. Only kicks in on GET; POST
+        // and other verbs fall through to the 404 below.
+        if (method === "GET") {
+          // Try to serve a real static file first (index.html on /, real asset on /assets/*).
+          const staticRes = await serveStatic(pathname);
+          if (staticRes !== null) return staticRes;
+
+          // SPA fallback: any GET that isn't claimed by the API prefixes
+          // returns dist/index.html so TanStack Router can handle /r/:id,
+          // /live, /metrics, /compare, etc. on the client.
+          if (!isApiOwned(pathname)) {
+            return await serveSpaFallback();
+          }
+        }
 
         emit("warn", "http.route.notFound", { method, path: pathname });
         return Response.json({ error: { message: `Not found: ${method} ${pathname}` } }, { status: 404 });
