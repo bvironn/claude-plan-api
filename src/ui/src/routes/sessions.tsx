@@ -98,8 +98,8 @@ function ConversationCard({ conv }: { conv: import("@/lib/sessions").Conversatio
 
   return (
     <Link
-      to="/r/$traceId"
-      params={{ traceId: conv.latestTraceId }}
+      to="/s/$sessionId"
+      params={{ sessionId: conv.id }}
       className="block"
     >
       <Card className="hover:border-primary/60 h-full cursor-pointer transition-colors">

@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
+import { useQuery } from "@tanstack/react-query"
 import {
   ActivityIcon,
   AlertCircleIcon,
@@ -11,8 +12,9 @@ import {
 } from "lucide-react"
 import { useMemo, useState } from "react"
 
+import { listLogs } from "@/lib/api"
 import { useEventStream } from "@/hooks/useEventStream"
-import type { LogLevel, LogStream } from "@/lib/types"
+import type { LogLevel, LogStream, TelemetryEvent } from "@/lib/types"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -40,18 +42,45 @@ const LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal"]
 const STREAMS: LogStream[] = ["http", "event", "perf", "app"]
 
 function LivePage() {
-  const { events, status, reconnects, paused, pendingCount, pause, resume, clear } = useEventStream()
+  // Historical backfill from SQLite — survives navigation, reloads, AND
+  // service restarts (the backend writes events to SQLite synchronously).
+  // We fetch the most-recent 200 events once on mount; the SSE stream
+  // then appends new events on top. Deduplication is by (timestamp, event)
+  // because the backend doesn't surface a stable event id.
+  const historical = useQuery({
+    queryKey: ["telemetry-logs-initial"],
+    queryFn: () => listLogs({ limit: 200, order: "desc" }),
+    staleTime: Infinity, // don't refetch; we rely on the SSE stream for new events
+  })
+
+  const { events: liveEvents, status, reconnects, paused, pendingCount, pause, resume, clear } = useEventStream()
 
   const [levelFilter, setLevelFilter] = useState<LogLevel | "">("")
   const [streamFilter, setStreamFilter] = useState<LogStream | "">("")
 
+  const merged = useMemo<TelemetryEvent[]>(() => {
+    const base = historical.data?.events ?? []
+    if (liveEvents.length === 0) return base
+    // Build a lookup set of historical keys so incoming live events that
+    // overlap (e.g. one that arrived between the REST fetch and the SSE
+    // open) don't appear twice.
+    const seen = new Set<string>(base.map((e) => `${e.timestamp}|${e.event}|${e.traceId ?? ""}`))
+    const deduped = liveEvents.filter((e) => {
+      const k = `${e.timestamp}|${e.event}|${e.traceId ?? ""}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    return [...deduped, ...base] // newest first on top
+  }, [historical.data, liveEvents])
+
   const filtered = useMemo(() => {
-    return events.filter((e) => {
+    return merged.filter((e) => {
       if (levelFilter && e.level !== levelFilter) return false
       if (streamFilter && e.stream !== streamFilter) return false
       return true
     })
-  }, [events, levelFilter, streamFilter])
+  }, [merged, levelFilter, streamFilter])
 
   return (
     <div className="container mx-auto flex flex-col gap-4 p-4 sm:p-6">
@@ -81,7 +110,8 @@ function LivePage() {
                 </Badge>
               )}
               <Badge variant="secondary" className="font-mono font-normal">
-                {filtered.length} / {events.length} shown
+                {filtered.length} / {merged.length} shown
+                {historical.data ? ` · ${historical.data.events.length} historical` : ""}
               </Badge>
             </CardTitle>
 
