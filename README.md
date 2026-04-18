@@ -135,6 +135,7 @@ cd src/ui && bun run typecheck
 | Env | Default | Notes |
 | --- | --- | --- |
 | `PORT` | `3456` | first CLI arg overrides |
+| `BIND_HOST` | `127.0.0.1` | address to bind. Defaults to loopback so the proxy is not exposed by accident. Set to `0.0.0.0` (or a specific IP) only if you knowingly want to expose the service — remember this gateway authenticates to Anthropic with **your** OAuth token |
 | `CREDENTIALS_PATH` | `~/.claude/.credentials.json` | OAuth credentials source |
 
 ## About that plaintext reasoning

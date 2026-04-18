@@ -2,6 +2,12 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 export const PORT = parseInt(process.argv[2] || Bun.env.PORT || "3456", 10);
+// Bind address for the HTTP server. Defaults to loopback so the gateway is
+// not exposed to the network by accident — the server proxies to Anthropic
+// using the operator's Claude Code OAuth token, so an open bind would let
+// any reachable client consume the operator's subscription. Opt into LAN or
+// public exposure explicitly with `BIND_HOST=0.0.0.0` (or a specific IP).
+export const BIND_HOST = Bun.env.BIND_HOST ?? "127.0.0.1";
 export const CREDENTIALS_PATH = Bun.env.CREDENTIALS_PATH || join(homedir(), ".claude", ".credentials.json");
 export const ANTHROPIC_API = "https://api.anthropic.com/v1/messages?beta=true";
 export const REFRESH_URL = "https://claude.ai/v1/oauth/token";

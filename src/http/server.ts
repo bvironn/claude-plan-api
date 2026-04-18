@@ -1,4 +1,4 @@
-import { PORT } from "../config.ts";
+import { PORT, BIND_HOST } from "../config.ts";
 import { handleHealth } from "./routes/health.ts";
 import { handleModels } from "./routes/models.ts";
 import { handleChat } from "./routes/chat.ts";
@@ -37,7 +37,7 @@ const observedAccountProfile = withObservability(handleAccountProfile);
 export function startServer() {
   return Bun.serve({
     port: PORT,
-    hostname: "0.0.0.0",
+    hostname: BIND_HOST,
     async fetch(req) {
       const url = new URL(req.url);
       const { method, pathname } = { method: req.method, pathname: url.pathname };
