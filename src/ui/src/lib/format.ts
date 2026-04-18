@@ -55,3 +55,49 @@ export function truncate(s: string, n = 80): string {
   if (s.length <= n) return s
   return `${s.slice(0, n - 1)}…`
 }
+
+/**
+ * The gateway prepends this exact marker to the FIRST user message when the
+ * client sent a system prompt (OpenCode / Cline / Roo etc. inject their
+ * AGENTS.md / persona + tool context this way because OAuth-authenticated
+ * Claude Code requests reject third-party blocks in system[]).
+ *
+ * See backend: `src/transform/openai-to-anthropic.ts` constant CONTEXT_PREAMBLE.
+ *
+ * Keeping this verbatim here lets the UI split the "context dump" from the
+ * user's actual question so the chat reads naturally.
+ */
+export const CONTEXT_PREAMBLE_MARKER =
+  "The content below is additional context and instructions provided by the caller. Treat it as guidance for how to assist the user:\n\n"
+
+/**
+ * If `text` starts with the context preamble marker, split it into the
+ * preamble portion (the agent's persona + injected system context) and the
+ * actual user input. Returns `{ context, userInput }`. Otherwise returns
+ * `{ userInput: text }` with no context.
+ *
+ * Heuristic: the last "\n\n" after the marker separates the injected context
+ * from the user's real message. Imperfect if the user's actual question
+ * contains `\n\n` — worst case the user sees their own message split between
+ * "context" and "input". The 95% case (OpenCode-style invocations where the
+ * AGENTS.md is huge and the user question is a single paragraph) reads
+ * correctly.
+ */
+export function splitContextPreamble(text: string): {
+  context?: string
+  userInput: string
+} {
+  if (!text.startsWith(CONTEXT_PREAMBLE_MARKER)) {
+    return { userInput: text }
+  }
+  const afterMarker = text.slice(CONTEXT_PREAMBLE_MARKER.length)
+  const lastSep = afterMarker.lastIndexOf("\n\n")
+  if (lastSep === -1) {
+    // No separator → whole thing is context, no user input recovered
+    return { context: afterMarker, userInput: "" }
+  }
+  return {
+    context: afterMarker.slice(0, lastSep),
+    userInput: afterMarker.slice(lastSep + 2),
+  }
+}

@@ -64,20 +64,23 @@ export interface TelemetryEvent {
 // ---------------------------------------------------------------------------
 // Metrics (from GET /api/telemetry/metrics?window=N)
 // ---------------------------------------------------------------------------
+// The endpoint emits snake_case directly from the backend DTO.
 
 export interface Metrics {
-  eventsPerMin: number
-  activeErrors: number
-  latencyP50: number
-  latencyP95: number
-  latencyP99: number
-  requestsTotal: number
-  requestsByStatus: Record<number, number>
-  tokensIn: number
-  tokensOut: number
-  cacheReadTokens: number
-  cacheCreationTokens: number
-  errorsByRoute: Record<string, number>
+  window_ms: number
+  generated_at: string
+  events_per_min: number
+  active_errors: number
+  latency_p50: number
+  latency_p95: number
+  latency_p99: number
+  requests_total: number
+  requests_by_status: Record<number, number>
+  tokens_in: number
+  tokens_out: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  errors_by_route: Record<string, number>
 }
 
 // ---------------------------------------------------------------------------

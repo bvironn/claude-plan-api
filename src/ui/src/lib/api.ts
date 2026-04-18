@@ -101,8 +101,8 @@ export function listLogs(filters: LogsFilters = {}): Promise<LogsResponse> {
 // Metrics
 // ---------------------------------------------------------------------------
 
-export function getMetrics(windowMs: number): Promise<Metrics & { window_ms: number }> {
-  return getJson<Metrics & { window_ms: number }>(`/api/telemetry/metrics?window=${windowMs}`)
+export function getMetrics(windowMs: number): Promise<Metrics> {
+  return getJson<Metrics>(`/api/telemetry/metrics?window=${windowMs}`)
 }
 
 // ---------------------------------------------------------------------------

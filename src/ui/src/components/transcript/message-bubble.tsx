@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { Fragment, useState } from "react"
 import { ChevronDownIcon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -9,9 +9,11 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
+import { splitContextPreamble } from "@/lib/format"
 import { RoleAvatar, type Role } from "@/components/transcript/role-avatar"
 import { ToolResultCard, ToolUseCard } from "@/components/transcript/tool-block"
 import { MarkdownView } from "@/components/transcript/markdown-view"
+import { ContextPreamble } from "@/components/transcript/context-preamble"
 
 interface ContentBlock {
   type?: string
@@ -148,29 +150,45 @@ export function MessageBubble({ role, content, toolCalls, toolCallId, name }: Me
           />
         ))}
 
-        {/* Text blocks (user/assistant plain text) */}
+        {/* Text blocks (user/assistant plain text).
+            For user messages, detect the injected CONTEXT_PREAMBLE and split
+            it into a collapsible "Context" card + the real user question.
+            This is a huge UX win for OpenCode/Cline-style invocations where
+            the preamble is 10-50k chars of AGENTS.md noise and the user's
+            actual question is a single short paragraph. */}
         {textBlocks.length > 0 && role !== "tool" && (
-          <div
-            className={cn(
-              "rounded-lg px-3.5 py-2.5",
-              isUser
-                ? "bg-primary text-primary-foreground"
-                : "bg-card border-border border",
-            )}
-          >
-            {textBlocks.map((b, i) => (
-              <MarkdownView
-                key={`t-${i}`}
-                content={b.text ?? ""}
-                className={cn(
-                  isUser && [
-                    "text-primary-foreground",
-                    "[&_code]:bg-primary-foreground/20",
-                    "[&_a]:text-primary-foreground [&_a]:underline",
-                  ],
-                )}
-              />
-            ))}
+          <div className="flex flex-col gap-2">
+            {textBlocks.map((b, i) => {
+              const text = b.text ?? ""
+              const split = isUser ? splitContextPreamble(text) : { userInput: text }
+
+              return (
+                <Fragment key={`t-${i}`}>
+                  {split.context && <ContextPreamble content={split.context} />}
+                  {split.userInput.length > 0 && (
+                    <div
+                      className={cn(
+                        "rounded-lg px-3.5 py-2.5",
+                        isUser
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-card border-border border",
+                      )}
+                    >
+                      <MarkdownView
+                        content={split.userInput}
+                        className={cn(
+                          isUser && [
+                            "text-primary-foreground",
+                            "[&_code]:bg-primary-foreground/20",
+                            "[&_a]:text-primary-foreground [&_a]:underline",
+                          ],
+                        )}
+                      />
+                    </div>
+                  )}
+                </Fragment>
+              )
+            })}
           </div>
         )}
 
