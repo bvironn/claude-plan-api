@@ -11,8 +11,6 @@ mkdirSync("logs", { recursive: true });
 
 // --- build multi-stream --------------------------------------------------
 
-const isDev = Bun.env.NODE_ENV !== "production";
-
 // pino-roll streams (one per file). We create them lazily at startup via
 // an async IIFE so we don't block module load. The logger falls back to
 // stdout-only until streams are ready (first request won't have files yet,
@@ -56,14 +54,19 @@ async function buildLogger() {
   attachStreamErrorGuard(eventStream, "event");
   attachStreamErrorGuard(perfStream, "perf");
 
+  // stdout is ALWAYS in the multistream — both dev and prod. This duplicates
+  // output to systemd journalctl (or whatever supervisor is running us) so
+  // operators get live visibility without having to tail logs/*.log. Rolling
+  // files (logs/app.log, logs/error.log) remain the canonical historical
+  // store; stdout is an ephemeral live view. High-traffic deployments may
+  // want to cap the journal with `journalctl --vacuum-size=...` or
+  // `Storage=volatile` in systemd — that's an operator concern, not a logger
+  // concern.
   const streams: pino.StreamEntry[] = [
     { level: "trace", stream: appStream },
     { level: "error", stream: errStream },
+    { level: "trace", stream: process.stdout },
   ];
-
-  if (isDev) {
-    streams.push({ level: "trace", stream: process.stdout });
-  }
 
   logger = pino(pinoOpts, pino.multistream(streams));
 
