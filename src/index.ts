@@ -1,4 +1,5 @@
 import { readCredentials, ensureValidToken } from "./domain/credentials.ts";
+import { refreshRegistry } from "./domain/models.ts";
 import { startServer } from "./http/server.ts";
 import { emit } from "./observability/logger.ts";
 import { installGlobalHandlers } from "./observability/globals.ts";
@@ -9,6 +10,15 @@ initStorage();
 readCredentials();
 const server = startServer();
 emit("info", "app.started", { port: server.port });
+
+// Eager-bootstrap the model registry in the background so the very first
+// POST /v1/chat/completions after boot rarely sees an empty cache (which
+// would force `resolveModel` to pass unknown claude-* ids through to
+// upstream via the warn-log branch — still correct, but suboptimal).
+// Fire-and-forget: refreshRegistry() already logs its own failures via
+// `models.registry.refresh.fallback`, so the outer .catch only silences
+// the unhandled-rejection noise.
+refreshRegistry().catch(() => {});
 const tokenRefreshInterval = setInterval(
   () => ensureValidToken().catch((err) => emit("error", "credentials.backgroundRefresh.failed", { error: String(err) })),
   60_000

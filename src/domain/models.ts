@@ -307,12 +307,20 @@ export function resolveModelVariant(input: string): ResolvedVariant {
  * Resolve user-facing aliases (sonnet/opus/haiku and prefixed ids like
  * "openai/claude-sonnet-4-6") to a concrete upstream model id.
  *
- * Strategy:
+ * Strategy (first match wins):
  *   1. Exact id match in the current catalog.
- *   2. Strip known prefixes and retry exact match.
+ *   2. Strip known prefixes (openai/, claude-local/) and retry exact match.
  *   3. Family alias (sonnet/opus/haiku) → the newest model of that family.
  *   4. Static aliases (kept for back-compat with existing clients).
- *   5. Last resort: claude-sonnet-4-6.
+ *   5. Concrete `claude-*` ids not in the catalog → PASS THROUGH verbatim
+ *      with a `models.resolve.passthrough` warn log. This preserves user
+ *      intent when the registry is stale (e.g. Anthropic shipped a new
+ *      model our cache hasn't seen yet) and turns a previously silent
+ *      downgrade-to-sonnet bug into an observable signal. Clients with a
+ *      typo get a clean 4xx from Anthropic instead of a masked sonnet
+ *      response.
+ *   6. Last resort: claude-sonnet-4-6 (for empty input / non-claude ids
+ *      like `gpt-4` where the caller is clearly asking for a default).
  */
 export function resolveModel(input: string): string {
   const catalog = currentCatalog();
@@ -328,6 +336,22 @@ export function resolveModel(input: string): string {
   // Static aliases kept for back-compat (never assumed present in registry).
   const staticAlias = STATIC_ALIASES[stripped];
   if (staticAlias && ids.has(staticAlias)) return staticAlias;
+
+  // Pass-through for concrete Anthropic ids that aren't in our catalog yet.
+  // Covers two real cases:
+  //   (a) Registry not yet populated after boot — eager bootstrap in index.ts
+  //       narrows this window but cannot eliminate it entirely.
+  //   (b) Anthropic ships a model before our registry refreshes.
+  // Either way, the user's explicit choice is honoured. If the id is a typo,
+  // Anthropic returns its own 4xx which the gateway propagates as-is.
+  if (stripped.startsWith("claude-")) {
+    emit("warn", "models.resolve.passthrough", {
+      requested: stripped,
+      catalogSize: catalog.length,
+      registryPopulated: registry !== null,
+    });
+    return stripped;
+  }
 
   return ids.has("claude-sonnet-4-6") ? "claude-sonnet-4-6" : catalog[0]?.id ?? "claude-sonnet-4-6";
 }

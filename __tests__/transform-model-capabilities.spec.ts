@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, spyOn } from "bun:test";
 import { openaiToAnthropic } from "../src/transform/openai-to-anthropic.ts";
 import {
   __seedRegistryForTests,
@@ -6,7 +6,9 @@ import {
   getModelLimits,
   getContextManagementEdits,
   pickContextManagementEdit,
+  resolveModel,
 } from "../src/domain/models.ts";
+import * as logger from "../src/observability/logger.ts";
 import type { UpstreamModel } from "../src/upstream/models-client.ts";
 
 // Tests run against a seeded registry so we exercise the capability gating
@@ -531,6 +533,166 @@ describe("context-management edit selection (from upstream)", () => {
       expect(body.context_management).toEqual({
         edits: [{ type: "compact_20260112", keep: "all" }],
       });
+    } finally {
+      undo();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model resolution — fallback & passthrough behaviour
+// ---------------------------------------------------------------------------
+//
+// Regression coverage for the silent sonnet-downgrade bug. Before the fix,
+// `resolveModel` mapped any unknown claude-* id to claude-sonnet-4-6 via its
+// last-resort branch. That masked:
+//   1. Boot-time race (registry=null until first GET /v1/models)
+//   2. New upstream models shipped before our cache refreshed
+//
+// Post-fix: claude-* unknowns pass through verbatim with a warn log; the
+// sonnet fallback stays only for empty input and non-claude ids.
+// ---------------------------------------------------------------------------
+
+describe("resolveModel — fallback & passthrough behaviour", () => {
+  // --- PASS-THROUGH-01: claude-* unknown to catalog is returned verbatim ---
+  test("PASS-THROUGH-01: unknown claude-* id is passed through verbatim", () => {
+    // Seed a registry that does NOT contain claude-opus-4-7.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+      seedModel({ id: "claude-opus-4-6", displayName: "Claude Opus 4.6" }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      const result = resolveModel("claude-opus-4-7");
+      expect(result).toBe("claude-opus-4-7");
+
+      // Exactly one models.resolve.passthrough warn must be emitted with the
+      // requested id in the payload.
+      const passthroughCalls = emitSpy.mock.calls.filter(
+        (c) => c[1] === "models.resolve.passthrough",
+      );
+      expect(passthroughCalls).toHaveLength(1);
+      const payload = passthroughCalls[0]?.[2] as Record<string, unknown>;
+      expect(payload.requested).toBe("claude-opus-4-7");
+      expect(payload.registryPopulated).toBe(true);
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  // --- PASS-THROUGH-02: known claude-* id returns verbatim via exact-match, NO warn ---
+  test("PASS-THROUGH-02: known claude-* id returns from exact-match branch without emitting passthrough warn", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      const result = resolveModel("claude-sonnet-4-6");
+      expect(result).toBe("claude-sonnet-4-6");
+
+      const passthroughCalls = emitSpy.mock.calls.filter(
+        (c) => c[1] === "models.resolve.passthrough",
+      );
+      expect(passthroughCalls).toHaveLength(0);
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  // --- FALLBACK-01: empty string falls back to sonnet, NO passthrough warn ---
+  test("FALLBACK-01: empty string falls back to sonnet (no passthrough warn)", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      const result = resolveModel("");
+      expect(result).toBe("claude-sonnet-4-6");
+
+      const passthroughCalls = emitSpy.mock.calls.filter(
+        (c) => c[1] === "models.resolve.passthrough",
+      );
+      expect(passthroughCalls).toHaveLength(0);
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  // --- FALLBACK-02: non-claude unknown id falls back to sonnet, NO passthrough warn ---
+  test("FALLBACK-02: non-claude id like 'gpt-4' still falls back to sonnet silently", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      const result = resolveModel("gpt-4");
+      expect(result).toBe("claude-sonnet-4-6");
+
+      // No passthrough warn — the feature is gated to claude-* prefix.
+      const passthroughCalls = emitSpy.mock.calls.filter(
+        (c) => c[1] === "models.resolve.passthrough",
+      );
+      expect(passthroughCalls).toHaveLength(0);
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  // --- ALIAS-01: family alias still works; prefers freshest undated id ---
+  test("ALIAS-01: 'opus' alias resolves to freshest undated opus (opus-4-7 over opus-4-6 when both present)", () => {
+    const undo = __seedRegistryForTests([
+      // catalog order matters: resolveFamilyAlias picks the first undated.
+      seedModel({ id: "claude-opus-4-7", displayName: "Claude Opus 4.7" }),
+      seedModel({ id: "claude-opus-4-6", displayName: "Claude Opus 4.6" }),
+      seedModel({ id: "claude-opus-4-5-20251101", displayName: "Claude Opus 4.5" }),
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+    ]);
+    try {
+      const result = resolveModel("opus");
+      expect(result).toBe("claude-opus-4-7");
+    } finally {
+      undo();
+    }
+  });
+
+  // --- ALIAS-02: OpenRouter-style prefix still works with pass-through underneath ---
+  test("ALIAS-02: 'openai/claude-opus-4-7' with opus-4-7 NOT in catalog → stripped + passed through", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      const result = resolveModel("openai/claude-opus-4-7");
+      expect(result).toBe("claude-opus-4-7");
+
+      // Passthrough warn fired for the stripped id (not the raw prefixed one).
+      const passthroughCalls = emitSpy.mock.calls.filter(
+        (c) => c[1] === "models.resolve.passthrough",
+      );
+      expect(passthroughCalls).toHaveLength(1);
+      const payload = passthroughCalls[0]?.[2] as Record<string, unknown>;
+      expect(payload.requested).toBe("claude-opus-4-7");
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  // --- INTEGRATION: transform passes the unknown claude-* id through to the body.model field ---
+  test("INTEGRATION-01: openaiToAnthropic with unknown claude-* id emits verbatim model in upstream body", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" }),
+    ]);
+    try {
+      const { body } = openaiToAnthropic({
+        model: "claude-opus-4-7",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(body.model).toBe("claude-opus-4-7");
     } finally {
       undo();
     }
