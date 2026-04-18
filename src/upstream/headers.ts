@@ -64,7 +64,15 @@ export function buildBetas(
     return filterExcluded(parts, excluded).join(",");
   }
 
-  // Base chat path — aligned with opencode-claude-auth's proven shape.
+  // Base chat path — aligned with the REAL opencode-claude-auth + OpenCode
+  // outbound request (captured byte-for-byte in
+  // `scripts/bare-thinking-test.ts` validation). The code of the plugin
+  // in isolation lists only 5 of these, but OpenCode's anthropic SDK
+  // merges in `structured-outputs-2025-11-13` and
+  // `fine-grained-tool-streaming-2025-05-14` on every request. Both
+  // correlate with the plaintext-thinking codepath on OAuth accounts;
+  // omitting them is one of the reasons we were getting redacted
+  // thinking. Order here mirrors the plugin's post-merge output.
   const parts: string[] = [
     "claude-code-20250219",
     "oauth-2025-04-20",
@@ -72,13 +80,15 @@ export function buildBetas(
     "context-management-2025-06-27",
   ];
   if (modelSupportsInterleavedThinking) {
-    // Plugin inserts this as the 3rd entry; order within the header is not
-    // semantically meaningful but we mirror the plugin for parity.
     parts.splice(2, 0, "interleaved-thinking-2025-05-14");
   }
   if (modelSupportsEffort) {
     parts.push("effort-2025-11-24");
   }
+  // Append betas injected by OpenCode's anthropic SDK; kept after the
+  // effort beta to preserve plugin order verbatim.
+  parts.push("structured-outputs-2025-11-13");
+  parts.push("fine-grained-tool-streaming-2025-05-14");
 
   // Long-context beta: kept as a default for claude-opus-4-6 specifically
   // because the existing retry loop in `anthropic-client.ts` relies on

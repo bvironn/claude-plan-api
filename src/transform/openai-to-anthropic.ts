@@ -13,18 +13,13 @@ import { repairToolPairs } from "./repair-tool-pairs.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-/**
- * Budget tokens per effort level. Mirrors the budgets the official Claude
- * Code CLI uses for its "think" / "think hard" / "think harder" /
- * "ultrathink" triggers. Values are floor + per-step ramp; Anthropic caps
- * them per-model internally if they exceed what the model allows.
- */
-const EFFORT_TO_BUDGET: Record<string, number> = {
-  low: 2_048,
-  medium: 4_096,
-  high: 8_192,
-  max: 16_000,
-};
+// (Removed EFFORT_TO_BUDGET — we no longer emit `thinking: { type: "enabled",
+// budget_tokens: N }`. See the thinking-mode block further down in
+// `openaiToAnthropic` for the rationale: `enabled + budget` triggers the
+// server-side redacted-thinking contract, which breaks audit streaming.
+// We now always emit `thinking: { type: "adaptive", display: "summarized" }`
+// alongside `output_config: { effort }` — byte-for-byte parity with the
+// reference opencode-claude-auth plugin.)
 
 // CONTEXT_PREAMBLE (the string that used to wrap the client's forwarded
 // system prompt) is intentionally GONE. The reference plugin
@@ -172,34 +167,38 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 
   // --- Thinking / effort mode selection ---
   //
-  // Departure from the previous "always adaptive" approach. The reference
-  // plugin `opencode-claude-auth` works because it runs against OpenCode's
-  // NATIVE anthropic provider, which sends `thinking: {type:"enabled",
-  // budget_tokens:N}` directly — the form that actually forces plaintext
-  // `thinking_delta` streaming.
+  // CRITICAL discovery (after byte-level capture of the real plugin +
+  // OpenCode request — see scripts/bare-thinking-test.ts):
   //
-  // We're an openai-compatible proxy, so we receive `reasoning_effort` and
-  // MUST translate. The previous translation (`thinking: adaptive` +
-  // `output_config.effort`) produced empty-plaintext thinking blocks —
-  // adaptive mode decided the prompts didn't merit streaming CoT.
+  //   `thinking: { type: "enabled", budget_tokens: N }`   → REDACTED
+  //       Anthropic's OAuth streaming endpoint responds with a thinking
+  //       block shell (`thinking: ""` + signed ciphertext in
+  //       `signature_delta`) and ZERO `thinking_delta` events. The
+  //       chain-of-thought never reaches the client in plaintext. This
+  //       is the "full CoT with cipher" contract; audit is impossible.
   //
-  // Rules:
-  //   A. adaptiveThinking + effort        → thinking.enabled{budget}
-  //   B. adaptiveThinking + no effort     → thinking.adaptive (model decides)
-  //   C. outputEffort only (no adaptive)  → output_config.effort
-  //   D. structured output                → neither (schema mode suppresses)
+  //   `thinking: { type: "adaptive", display: "summarized" }` → PLAINTEXT
+  //       Anthropic streams real `thinking_delta` events containing a
+  //       natural-language summary of the model's reasoning. This is
+  //       the mode the official Claude Code client + the opencode-claude-auth
+  //       plugin actually use (confirmed by intercepting OpenCode's
+  //       outbound fetch). The "summarized" display keeps the plaintext
+  //       contract; "full" also exists but with different billing/rate.
   //
-  // thinking.enabled and output_config.effort are mutually exclusive —
-  // budget_tokens already expresses effort intent.
-  let usedEnabledThinking = false;
+  // Implementation consequences:
+  //   - We NEVER emit `thinking.enabled` any more. The request goes out
+  //     as `adaptive + summarized` whenever the model supports adaptive
+  //     thinking, regardless of whether the client passed an effort.
+  //   - `output_config.effort` is emitted ALONGSIDE `thinking.adaptive`
+  //     (previously we treated them as mutually exclusive — that was
+  //     wrong; the plugin sends both and it works). `effort` still maps
+  //     1:1 from client-supplied `reasoning_effort`.
+  //   - Structured-output mode still suppresses both (schema takes over).
+  //
+  // This preserves the observability use-case of this proxy: the audit
+  // UI can render a readable plaintext reasoning summary per request.
   if (!isStructuredOutput && caps.adaptiveThinking) {
-    if (effectiveEffort !== null) {
-      const budget = EFFORT_TO_BUDGET[effectiveEffort] ?? 4096;
-      result.thinking = { type: "enabled", budget_tokens: budget };
-      usedEnabledThinking = true;
-    } else {
-      result.thinking = { type: "adaptive" };
-    }
+    result.thinking = { type: "adaptive", display: "summarized" };
   }
 
   // INTENTIONALLY OMITTED: context_management edits in the request body.
@@ -236,14 +235,14 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   // default. Default behaviour optimises for the audit use-case:
   // visible thinking, byte-for-byte parity with the plugin.
 
-  // Case C: emit output_config.effort only when we did NOT use
-  // thinking.enabled. When enabled is active, budget_tokens already
-  // expresses intent and effort would be redundant/conflicting.
+  // output_config.effort now co-exists with thinking.adaptive (see the
+  // thinking-mode block above). Previously we treated them as mutually
+  // exclusive, which was a mis-read of the API contract — the reference
+  // plugin sends both together and that is what the server expects.
   if (
     caps.outputEffort &&
     !isStructuredOutput &&
-    effectiveEffort !== null &&
-    !usedEnabledThinking
+    effectiveEffort !== null
   ) {
     result.output_config = { effort: effectiveEffort };
   }
@@ -266,6 +265,13 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
         input_schema: fn.parameters || { type: "object", properties: {} },
       };
     });
+    // Mirror the reference plugin: when tools are declared, default
+    // `tool_choice` to `{type: "auto"}` unless the caller supplied
+    // one explicitly. The plugin always sends this and the server
+    // accepts it as a no-op when no tool is actually invoked.
+    if (!result.tool_choice) {
+      result.tool_choice = { type: "auto" };
+    }
   }
 
   emit("debug", "transform.request", {
