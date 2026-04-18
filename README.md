@@ -1,10 +1,11 @@
 # claude-plan-api
 
-OpenAI-compatible gateway for Claude Max/Pro, with first-class observability. Audit is consumed directly via the HTTP API (curl, scripts, SQLite) — no bundled UI.
+OpenAI-compatible gateway for Claude Max/Pro, with first-class observability. Ships with an audit dashboard (React + TanStack Router + shadcn/ui) and the raw HTTP API + SQLite store for scripting.
 
 ## What This Repo Contains
 
 - `src/`: Bun backend API gateway (`/v1/chat/completions`, `/v1/models`, `/health`, `/api/telemetry/*`)
+- `src/ui/`: Audit dashboard — Vite + React 19 + TanStack Router + TanStack Query + Tailwind v4 + shadcn/ui (nova preset)
 - `logs/`: runtime log files and `telemetry.db` SQLite store
 - `__tests__/`: backend integration tests
 
@@ -74,6 +75,61 @@ Specific suites:
 ```bash
 bun test __tests__/observability.spec.ts
 bun test __tests__/transform-thinking-passthrough.spec.ts
+```
+
+## Audit Dashboard
+
+The dashboard is a static SPA bundled into `src/ui/dist/` and served by the backend alongside the API (same process, same port). In production, hitting `GET /` on the gateway serves the compiled dashboard; in development you run the Vite dev server with a proxy to the backend.
+
+### Routes
+
+- `/` — Requests list (filters: model, status, free-text search; URL-driven)
+- `/sessions` — Conversations grouped from consecutive turns
+- `/s/:sessionId` — All turns of a conversation, sticky-header per turn
+- `/r/:traceId` — Full transcript (system blocks, messages, tools, reasoning) + technical side panel + span timeline + Replay + Export (JSON / Markdown)
+- `/live` — Real-time SSE stream of telemetry events, pausable, level/stream filters
+- `/metrics` — Aggregated metrics with window toggle (1m / 5m / 1h / 24h) + charts
+- `/compare?a=<traceA>&b=<traceB>` — Side-by-side transcripts with scroll-sync
+
+### Keyboard shortcuts (global)
+
+- `/` — focus search input on the current route
+- `j` / `k` — move list selection down / up (on the Requests list)
+- `Enter` — open the selected row
+- `Esc` — clear selection / blur focused input
+
+### Dev loop
+
+From the repo root, run the gateway and the Vite dev server in two terminals:
+
+```bash
+# terminal 1 — backend gateway (default port 3456, but we prefer 3457 for dev)
+bun run src/index.ts 3457
+
+# terminal 2 — UI dev server (Vite @ http://localhost:5173 with /api, /v1, /health proxied to 3457)
+cd src/ui
+bun install   # first time only
+bun run dev
+```
+
+Open http://localhost:5173 in your browser. HMR is on. Every `/api/*`, `/v1/*`, `/health` request is proxied to `http://127.0.0.1:3457`.
+
+### Build for production
+
+The backend only serves `src/ui/dist/` if it exists on disk; build it once, then the gateway picks it up automatically on next request:
+
+```bash
+cd src/ui
+bun run build     # runs `tsr generate && tsc -b && vite build` → writes src/ui/dist/
+```
+
+Then start the gateway as usual; `GET http://localhost:3456/` will now return the compiled SPA, and unknown GET paths fall through to `/index.html` for client-side routing.
+
+### Typecheck
+
+```bash
+cd src/ui
+bun run typecheck   # runs `tsr generate && tsc --noEmit`
 ```
 
 ## Docs

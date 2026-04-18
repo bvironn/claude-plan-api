@@ -28,9 +28,11 @@ import {
 import { ModelBadge, StatusBadge } from "@/components/layout/status-badge"
 import { CopyButton } from "@/components/layout/copy-button"
 import { TranscriptView } from "@/components/transcript/transcript-view"
+import { RouteError } from "@/components/layout/route-error"
 
 export const Route = createFileRoute("/s/$sessionId")({
   component: SessionDetailPage,
+  errorComponent: RouteError,
 })
 
 function SessionDetailPage() {

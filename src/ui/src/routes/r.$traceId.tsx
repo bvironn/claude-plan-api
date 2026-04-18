@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
 import { useQuery } from "@tanstack/react-query"
+import { useState } from "react"
 import { AlertCircleIcon, ArrowLeftIcon, MessageSquareIcon } from "lucide-react"
 
 import { getRequest } from "@/lib/api"
@@ -14,18 +15,27 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { TranscriptView } from "@/components/transcript/transcript-view"
+import {
+  ReplayButton,
+  ReplayPanel,
+  type ReplayRecord,
+} from "@/components/transcript/replay-button"
+import { ExportMenu } from "@/components/transcript/export-menu"
 import { TechnicalPanel } from "@/components/panels/technical-panel"
 import { SpanTimeline } from "@/components/panels/span-timeline"
 import { Separator } from "@/components/ui/separator"
 import { StatusBadge } from "@/components/layout/status-badge"
 import { formatRelativeTime } from "@/lib/format"
+import { RouteError } from "@/components/layout/route-error"
 
 export const Route = createFileRoute("/r/$traceId")({
   component: TranscriptPage,
+  errorComponent: RouteError,
 })
 
 function TranscriptPage() {
   const { traceId } = Route.useParams()
+  const [replay, setReplay] = useState<ReplayRecord | null>(null)
 
   const query = useQuery({
     queryKey: ["request", traceId],
@@ -52,6 +62,14 @@ function TranscriptPage() {
             <span className="text-muted-foreground hidden text-sm sm:inline">
               {formatRelativeTime(query.data.request.timestamp)}
             </span>
+            <div className="ml-auto flex items-center gap-2">
+              <ReplayButton
+                original={query.data.request}
+                onReplay={setReplay}
+                externalInFlight={replay?.streaming ?? false}
+              />
+              <ExportMenu record={query.data.request} events={query.data.events} />
+            </div>
           </>
         )}
       </div>
@@ -86,6 +104,7 @@ function TranscriptPage() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,380px)]">
           <div className="flex min-w-0 flex-col gap-4">
             <TranscriptView record={query.data.request} />
+            <ReplayPanel replay={replay} />
           </div>
           <div className="flex flex-col gap-4 lg:sticky lg:top-20 lg:self-start">
             <TechnicalPanel request={query.data.request} />

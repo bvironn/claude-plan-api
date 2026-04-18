@@ -32,10 +32,13 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
 import { LevelBadge } from "@/components/layout/level-badge"
+import { RouteError } from "@/components/layout/route-error"
 
 export const Route = createFileRoute("/live")({
   component: LivePage,
+  errorComponent: RouteError,
 })
 
 const LEVELS: LogLevel[] = ["trace", "debug", "info", "warn", "error", "fatal"]
@@ -170,7 +173,9 @@ function LivePage() {
         </CardHeader>
         <CardContent className="p-0">
           <ScrollArea className="h-[calc(100vh-320px)] min-h-[400px]">
-            {filtered.length === 0 ? (
+            {historical.isPending && filtered.length === 0 ? (
+              <LiveSkeleton />
+            ) : filtered.length === 0 ? (
               <div className="flex min-h-[300px] items-center justify-center p-6">
                 <Empty>
                   <EmptyHeader>
@@ -236,6 +241,21 @@ function EventRow({ event }: { event: import("@/lib/types").TelemetryEvent }) {
         </Link>
       )}
     </li>
+  )
+}
+
+function LiveSkeleton() {
+  return (
+    <div className="flex flex-col gap-0">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className="flex items-center gap-3 px-4 py-2">
+          <Skeleton className="h-3 w-14" />
+          <Skeleton className="h-5 w-12" />
+          <Skeleton className="h-5 w-14" />
+          <Skeleton className="h-3 flex-1" />
+        </div>
+      ))}
+    </div>
   )
 }
 

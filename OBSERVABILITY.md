@@ -316,3 +316,37 @@ The test suite:
 - **Log file names are `app.1.log` not `app.log`**: This is pino-roll v4 behavior. The suffix increments on each rotation. Use a glob like `app.*.log` to tail all rotations.
 - **pino-roll streams not ready on first request**: Streams are built asynchronously; the synchronous stdout logger is active immediately. File writes land within ~1s of startup and are available for all subsequent requests.
 - **`journalctl -u claude-plan-api` is quiet**: Confirm you are on commit `0bcaf20` or later — earlier code gated stdout behind `NODE_ENV !== production`, which made the journal silent under systemd. The current logger always includes stdout.
+
+---
+
+## UI Surface
+
+The audit dashboard (`src/ui/`) is a thin view layer — every screen is a direct read-only consumer of one or more telemetry endpoints. There is no separate UI-side store; TanStack Query owns cache state.
+
+| Route | Primary endpoint(s) | Refresh strategy |
+|-------|---------------------|------------------|
+| `/` (Requests list) | `GET /api/telemetry/requests` | `refetchInterval: 5_000` (polling; pausable by navigating away) |
+| `/sessions` (Conversation list) | `GET /api/telemetry/requests?path=/v1/chat/completions&limit=500` | `refetchInterval: 10_000`. Grouping is client-side by first user message + ~1 h gap. |
+| `/s/:sessionId` (Session detail) | same as `/sessions` + `GET /api/telemetry/requests/:traceId` (one per turn, in parallel) | `refetchInterval: 10_000` on the session list; per-turn transcripts are fetched once and cached by trace id. |
+| `/r/:traceId` (Transcript) | `GET /api/telemetry/requests/:traceId` | `staleTime: 30_000` (requests are immutable once complete) |
+| `/live` (Live stream) | `GET /api/telemetry/logs?limit=200` for backfill + `GET /api/telemetry/stream` (SSE) for live | Historical fetched once. SSE owns new events; exponential backoff reconnect 3s → 30s; pausable client-side. |
+| `/metrics` | `GET /api/telemetry/metrics?window=<ms>` | `refetchInterval: 10_000` when not paused; `staleTime: 5_000`. |
+| `/compare?a=&b=` | `GET /api/telemetry/requests/:traceId` × 2 in parallel via `useQueries` | `staleTime: 30_000`. No auto-refresh. |
+| `/r/:traceId` → Replay button | `POST /v1/chat/completions` (original body, streamed back via SSE) | One-shot per click; result lives in a synthetic record rendered below the original transcript. |
+| `/r/:traceId` → Export menu | client-only (no new endpoint) | JSON and Markdown downloads built from already-fetched data. |
+
+### Why it stays cheap
+
+- All read endpoints are served from SQLite with indexes on `trace_id`, `session_id`, `timestamp`; no N+1 because `/api/telemetry/requests/:traceId` returns the request record plus its full event timeline in one payload.
+- `/api/telemetry/stream` is the only long-lived connection — the dashboard opens exactly one per `/live` page instance.
+- Polling intervals were picked so the list pages survive the highest expected backend write rate (5 s for requests, 10 s for metrics/sessions) without hammering SQLite.
+
+### Static serving
+
+When `src/ui/dist/` exists, the backend's `serveStatic()` in `src/http/static.ts` serves:
+
+- `GET /` → `src/ui/dist/index.html`
+- `GET /assets/*` → hashed bundle files with `Cache-Control: public, max-age=31536000, immutable`
+- Any GET that is NOT `/api/*`, `/v1/*`, `/health`, or `/assets/*` → `index.html` (SPA fallback)
+
+If `dist/` is absent, the backend responds `503` to `/` and SPA fallback paths with a JSON error telling you to run the build. API routes keep working either way.

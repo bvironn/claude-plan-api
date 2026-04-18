@@ -46,6 +46,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
+import { RouteError } from "@/components/layout/route-error"
 
 type WindowKey = "1m" | "5m" | "1h" | "24h"
 
@@ -60,6 +61,7 @@ type MetricsSearch = { window?: WindowKey; paused?: boolean }
 
 export const Route = createFileRoute("/metrics")({
   component: MetricsPage,
+  errorComponent: RouteError,
   validateSearch: (search): MetricsSearch => {
     const w = typeof search.window === "string" ? search.window : undefined
     const window = w === "1m" || w === "5m" || w === "1h" || w === "24h" ? w : undefined

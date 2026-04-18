@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 import { useQuery } from "@tanstack/react-query"
-import { useMemo, useEffect, useRef } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { ListIcon, ZapIcon } from "lucide-react"
 
 import { listRequests } from "@/lib/api"
@@ -11,6 +11,7 @@ import {
   formatRelativeTime,
   truncate,
 } from "@/lib/format"
+import { useRegisterShortcuts } from "@/hooks/useKeyboardShortcuts"
 
 import {
   RequestsFilters,
@@ -18,6 +19,7 @@ import {
 } from "@/components/layout/requests-filters"
 import { ModelBadge, StatusBadge } from "@/components/layout/status-badge"
 import { CopyButton } from "@/components/layout/copy-button"
+import { RouteError } from "@/components/layout/route-error"
 
 import {
   Empty,
@@ -51,6 +53,7 @@ type IndexSearch = {
 
 export const Route = createFileRoute("/")({
   component: IndexPage,
+  errorComponent: RouteError,
   validateSearch: (search): IndexSearch => {
     const q = typeof search.q === "string" && search.q.length > 0 ? search.q : undefined
     const statusRaw = typeof search.status === "string" ? search.status : undefined
@@ -119,23 +122,39 @@ function IndexPage() {
     })
   }
 
-  // Keyboard shortcut: `/` focuses the search input (global, ignoring editable targets).
-  const searchInputRef = useRef<HTMLInputElement | null>(null)
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key !== "/") return
-      if (e.metaKey || e.ctrlKey || e.altKey) return
-      const t = e.target as HTMLElement | null
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return
-      e.preventDefault()
-      const el = document.querySelector<HTMLInputElement>("input[data-search-input]")
-      el?.focus()
-      el?.select()
-      searchInputRef.current = el
-    }
-    window.addEventListener("keydown", handler)
-    return () => window.removeEventListener("keydown", handler)
+  // Keyboard shortcut wiring via the root provider. `/` focuses the search
+  // input; `j`/`k` move the highlighted row; `Enter` opens it; `Esc` clears.
+  const requests = query.data?.requests ?? []
+  const [selectedIndex, setSelectedIndex] = useState<number>(-1)
+
+  const onSlash = useCallback(() => {
+    const el = document.querySelector<HTMLInputElement>("input[data-search-input]")
+    el?.focus()
+    el?.select()
   }, [])
+
+  const onJ = useCallback(() => {
+    if (requests.length === 0) return
+    setSelectedIndex((i) => Math.min(requests.length - 1, i < 0 ? 0 : i + 1))
+  }, [requests.length])
+
+  const onK = useCallback(() => {
+    if (requests.length === 0) return
+    setSelectedIndex((i) => Math.max(0, i < 0 ? 0 : i - 1))
+  }, [requests.length])
+
+  const onEnter = useCallback(() => {
+    if (selectedIndex < 0 || selectedIndex >= requests.length) return
+    const r = requests[selectedIndex]
+    if (!r) return
+    navigate({ to: "/r/$traceId", params: { traceId: r.traceId } })
+  }, [navigate, selectedIndex, requests])
+
+  const onEscape = useCallback(() => {
+    setSelectedIndex(-1)
+  }, [])
+
+  useRegisterShortcuts({ onSlash, onJ, onK, onEnter, onEscape })
 
   return (
     <div className="container mx-auto flex flex-col gap-4 p-4 sm:p-6">
@@ -168,7 +187,11 @@ function IndexPage() {
       ) : query.data && query.data.requests.length === 0 ? (
         <EmptyState filtered={Boolean(search.q || search.status || search.model)} />
       ) : (
-        <RequestsTable requests={query.data?.requests ?? []} total={query.data?.total ?? 0} />
+        <RequestsTable
+          requests={requests}
+          total={query.data?.total ?? 0}
+          selectedIndex={selectedIndex}
+        />
       )}
     </div>
   )
@@ -178,7 +201,15 @@ function IndexPage() {
 // Table (composition-only — shadcn Table primitives)
 // ---------------------------------------------------------------------------
 
-function RequestsTable({ requests, total }: { requests: RequestRecord[]; total: number }) {
+function RequestsTable({
+  requests,
+  total,
+  selectedIndex,
+}: {
+  requests: RequestRecord[]
+  total: number
+  selectedIndex: number
+}) {
   return (
     <div className="flex flex-col gap-2">
       <div className="text-muted-foreground flex items-center justify-between text-xs">
@@ -186,7 +217,10 @@ function RequestsTable({ requests, total }: { requests: RequestRecord[]; total: 
           {requests.length} of {total} shown
         </span>
         <span className="hidden sm:block">
-          auto-refresh every 5 s · press <kbd className="bg-muted rounded px-1 py-0.5">/</kbd> to search
+          auto-refresh every 5 s · <kbd className="bg-muted rounded px-1 py-0.5">/</kbd> search ·{" "}
+          <kbd className="bg-muted rounded px-1 py-0.5">j</kbd>/
+          <kbd className="bg-muted rounded px-1 py-0.5">k</kbd> move ·{" "}
+          <kbd className="bg-muted rounded px-1 py-0.5">Enter</kbd> open
         </span>
       </div>
 
@@ -203,8 +237,12 @@ function RequestsTable({ requests, total }: { requests: RequestRecord[]; total: 
             </TableRow>
           </TableHeader>
           <TableBody>
-            {requests.map((r) => (
-              <RequestRow key={r.traceId} request={r} />
+            {requests.map((r, i) => (
+              <RequestRow
+                key={r.traceId}
+                request={r}
+                selected={i === selectedIndex}
+              />
             ))}
           </TableBody>
         </Table>
@@ -213,13 +251,16 @@ function RequestsTable({ requests, total }: { requests: RequestRecord[]; total: 
   )
 }
 
-function RequestRow({ request }: { request: RequestRecord }) {
+function RequestRow({ request, selected = false }: { request: RequestRecord; selected?: boolean }) {
   const inT = request.inputTokens ?? 0
   const outT = request.outputTokens ?? 0
   const total = inT + outT
 
   return (
-    <TableRow className="cursor-pointer">
+    <TableRow
+      className={`cursor-pointer ${selected ? "bg-accent/60" : ""}`}
+      data-selected={selected || undefined}
+    >
       <TableCell className="text-sm">
         <Link to="/r/$traceId" params={{ traceId: request.traceId }} className="block">
           <span className="font-medium">{formatRelativeTime(request.timestamp)}</span>

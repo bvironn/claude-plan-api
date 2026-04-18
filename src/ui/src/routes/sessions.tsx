@@ -24,9 +24,11 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { ModelBadge } from "@/components/layout/status-badge"
+import { RouteError } from "@/components/layout/route-error"
 
 export const Route = createFileRoute("/sessions")({
   component: SessionsPage,
+  errorComponent: RouteError,
 })
 
 function SessionsPage() {
