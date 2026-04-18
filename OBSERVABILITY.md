@@ -56,7 +56,7 @@ Central `emit()` function — the single entry point for all telemetry writes. B
 - optional `EmitOverrides` for frontend-originated events (traceId, sessionId, timestamp)
 
 Writes to three sinks simultaneously:
-1. **pino multistream**: `app.log` (all levels) + `error.log` (level ≥ error) + stdout in dev mode
+1. **pino multistream**: `app.log` (all levels) + `error.log` (level ≥ error) + `stdout` (always, so systemd `journalctl` has live visibility in every environment)
 2. **Tagged streams**: `http.log` (stream=`http`), `events.log` (stream=`event`), `performance.log` (stream=`perf`)
 3. **SQLite**: `insertEvent()` from storage.ts
 4. **Event bus**: `publish()` from event-bus.ts → SSE clients
@@ -258,143 +258,6 @@ export async function getFromCache(key: string): Promise<string | null> {
 
 ---
 
-## Frontend pipeline (`dashboard/`)
-
-### Modules
-
-#### `dashboard/src/lib/telemetry/capture.ts`
-
-`capture(event, payload)` — the frontend equivalent of backend `emit()`. Calls `enqueue()` from buffer.ts with the event + sessionId + timestamp.
-
-`start()` installs all DOM/API interceptors (idempotent via `initialized` guard). Called once by `ObservabilityProvider` on mount.
-
-Internal interceptors:
-
-- **click**: `document.addEventListener("click", ...)` capture=true — fires on every DOM click before other handlers
-- **navigation**: monkey-patches `history.pushState` / `history.replaceState`, listens to `popstate`
-- **fetch**: replaces `window.fetch` with a wrapper that emits start/end/error events, skip if `x-telemetry-internal: 1`
-- **XHR**: monkey-patches `XMLHttpRequest.prototype.open` / `.send` to attach `_tel` metadata and fire start/loadend
-- **errors**: `window.onerror`, `window.onunhandledrejection`
-- **web-vitals**: lazy `import("web-vitals")` → CLS, FCP, LCP, INP, TTFB
-- **scroll**: tracks `maxScrollPct` (high-water mark) via passive scroll listener
-- **visibility**: `visibilitychange`, `focus`, `blur`, `pagehide`
-
-#### `dashboard/src/lib/telemetry/buffer.ts`
-
-IndexedDB queue with interval-based flushing. Guarantees delivery even on quick page unloads via `navigator.sendBeacon`.
-
-Key constants:
-- `FLUSH_INTERVAL_MS = 5000` — flush timer interval
-- `FLUSH_BATCH_MAX = 50` — max events per flush batch
-- `FLUSH_ENDPOINT = "/api/proxy/telemetry"` — routes through Next.js proxy to backend
-
-`enqueue(event)` — adds to IndexedDB; triggers an immediate flush if the queue reaches `FLUSH_BATCH_MAX`.
-
-`flushBatch(max)` — reads up to `max` events from IDB, deletes them, sends via `fetch` with `x-telemetry-internal: 1`.
-
-`sendBeaconFlush()` — synchronous IDB read + `navigator.sendBeacon` for pagehide/visibilitychange=hidden.
-
-`start()` — opens IDB, starts the flush interval, registers visibility/pagehide listeners.
-
-#### `dashboard/src/components/observability-provider.tsx`
-
-Client component that:
-1. Calls `startBuffer()` and `startCapture()` on mount (React `useEffect`)
-2. Wraps the entire app tree in a `ReactErrorBoundary` class component
-3. `ReactErrorBoundary.componentDidCatch` emits `react.error` with message + stack + componentStack
-
----
-
-### Captured events
-
-| Event | When it fires | Key payload fields |
-|---|---|---|
-| `session.start` | On `start()` init | `url`, `referrer`, `userAgent` |
-| `ui.click` | Any DOM click | `selector`, `text` (≤80 chars), `x`, `y`, `button`, `pageUrl` |
-| `ui.nav` | `pushState` / `replaceState` / `popstate` | `type`, `url` |
-| `net.fetch.start` | Before any `fetch()` call | `url`, `method`, `traceId` |
-| `net.fetch.end` | After fetch resolves | `url`, `method`, `traceId`, `status`, `duration` (ms) |
-| `net.fetch.error` | If fetch throws | `url`, `method`, `traceId`, `error`, `duration` |
-| `net.xhr.start` | On `XMLHttpRequest.send()` | `url`, `method`, `traceId` |
-| `net.xhr.end` | On XHR `loadend` | `url`, `method`, `traceId`, `status`, `duration` |
-| `js.error` | `window.onerror` | `message`, `source`, `lineno`, `colno`, `stack` |
-| `js.unhandledRejection` | `window.onunhandledrejection` | `reason`, `stack` |
-| `web-vitals.CLS` | Core Web Vital | `value`, `rating` |
-| `web-vitals.FCP` | Core Web Vital | `value`, `rating` |
-| `web-vitals.LCP` | Core Web Vital | `value`, `rating` |
-| `web-vitals.INP` | Core Web Vital | `value`, `rating` |
-| `web-vitals.TTFB` | Core Web Vital | `value`, `rating` |
-| `page.hidden` | `visibilitychange` → hidden | `url`, `timeOnPageMs`, `maxScrollPct` |
-| `page.exit` | `pagehide` | `url`, `timeOnPageMs`, `maxScrollPct` |
-| `window.focus` | window focus | `url` |
-| `window.blur` | window blur | `url` |
-| `react.error` | React error boundary | `message`, `stack`, `componentStack` |
-
-Note: `net.fetch.*` skips calls that carry `x-telemetry-internal: 1` to prevent infinite loops when the buffer itself flushes.
-
----
-
-### Adding tracking to a new React component — RECIPE
-
-Import and call `capture()` directly anywhere in client components:
-
-```tsx
-"use client";
-import { capture } from "@/lib/telemetry/capture";
-
-function ExportButton() {
-  const handleClick = () => {
-    capture("ui.custom", {
-      feature: "export",
-      format: "csv",
-      rowCount: 1234,
-    });
-    // ... do the export
-  };
-
-  return <button onClick={handleClick}>Export CSV</button>;
-}
-```
-
-For tracking form submissions:
-
-```tsx
-capture("form.submit", {
-  formId: "settings",
-  fieldCount: 5,
-  hasErrors: false,
-});
-```
-
-Note: `capture()` is a no-op in SSR (`typeof window === "undefined"` guard), so it's safe to call in any component without conditional checks.
-
----
-
-### Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `NEXT_PUBLIC_API_URL` | via next.config.ts rewrite | Direct backend URL; overrides proxy |
-| `BACKEND_URL` (server-side) | `http://127.0.0.1:3456` | Used by `/api/proxy/[...path]/route.ts` |
-| Flush interval | `5000` ms | `FLUSH_INTERVAL_MS` in `buffer.ts` |
-| Flush batch size | `50` events | `FLUSH_BATCH_MAX` in `buffer.ts` |
-| Flush endpoint | `/api/proxy/telemetry` | Routes through Next.js to `BACKEND_URL/api/telemetry` |
-
----
-
-## Dashboard usage (`/observability`)
-
-- **Overview tab**: Live metrics cards (requests total, latency p50/p95, error count, events/min) + Recharts line chart of request rate over time + errors-by-route bar chart + device breakdown pie + click heatmap. Auto-refreshes every 10s.
-- **Logs tab**: `EventsTable` — filterable by level, stream, event name, full-text search; sortable; paginated. Click any row to open the event payload drawer.
-- **Requests tab**: `RequestsTable` — request-level view with method, path, status, duration, model; sortable; pagination. Click a row for the full `RequestDrawer` with all token counts, request/response bodies, and span timeline.
-- **Sessions tab**: `SessionTimeline` — groups events by `sessionId`, renders a chronological event list per session.
-- **Live tab**: `LiveStream` — connects to `GET /api/telemetry/stream` (SSE), tails events in real time with auto-reconnect (3s initial, up to 30s backoff).
-- **Theme toggle**: top-right corner, persists in `localStorage` via `next-themes`.
-- **Export button**: `ExportMenu` dropdown — exports events or requests as CSV or JSON via `GET /api/telemetry/export`.
-- **Deep link**: `/observability/request/:traceId` renders a single-request view for shareable links.
-
----
-
 ## API Endpoints
 
 | Method | Path | Description |
@@ -402,7 +265,8 @@ Note: `capture()` is a no-op in SSR (`typeof window === "undefined"` guard), so 
 | GET | `/health` | Returns `{ status: "ok" }` |
 | GET | `/v1/models` | List available Claude models |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat proxy |
-| POST | `/api/telemetry` | Ingest frontend events (batch, max 500; middleware-silent path) |
+| POST | `/v1/tokens/count` | Count tokens for a given message shape |
+| GET | `/api/account/profile` | Cached Anthropic profile (account, organization, application) |
 | GET | `/api/telemetry/logs` | Query events with filters |
 | GET | `/api/telemetry/stream` | SSE stream of live events |
 | GET | `/api/telemetry/metrics` | Aggregated metrics for a time window |
@@ -420,25 +284,12 @@ Query parameters for `/api/telemetry/metrics`:
 
 ## Running
 
-### Backend only
-
 ```bash
 bun src/index.ts [port]
 # default port: 3456
 ```
 
-### Dashboard
-
-```bash
-cd dashboard && bun run dev
-# serves on :3000; proxies /api/proxy/* → http://127.0.0.1:3456
-```
-
-### Both together
-
-```bash
-(bun src/index.ts &) && (cd dashboard && bun run dev)
-```
+Run under systemd for production; journalctl shows all telemetry events (stdout is always attached to the pino multistream — see `logger.ts`).
 
 ---
 
@@ -449,22 +300,19 @@ bun test __tests__/observability.spec.ts
 ```
 
 The test suite:
-1. Spawns a backend server on port 3998
-2. Verifies `GET /health` → `x-trace-id` header → SQLite `requests` + `events` rows
-3. Posts a `ui.click` event via `POST /api/telemetry` and queries it back via `/api/telemetry/logs`
-4. Opens SSE on `/api/telemetry/stream`, triggers requests, verifies events are received
-5. Verifies `/api/telemetry/metrics` returns the expected shape with `requests_total > 0`
-6. Verifies `/api/telemetry/export?format=csv` returns an attachment with correct CSV headers
-7. Posts a `guard.toolError` event and confirms it persists through the ingest → SQLite → API pipeline
-8. Verifies `/api/telemetry` accepts `x-telemetry-internal: 1` without error (anti-loop header)
+1. Spawns a backend server on an ephemeral port.
+2. Verifies `GET /health` → `x-trace-id` header → SQLite `requests` + `events` rows.
+3. Opens SSE on `/api/telemetry/stream`, triggers requests, verifies events are received.
+4. Verifies `/api/telemetry/metrics` returns the expected shape with `requests_total > 0`.
+5. Verifies `/api/telemetry/export?format=csv` returns an attachment with correct CSV headers.
 
 ---
 
 ## Troubleshooting
 
 - **`logs/` not created**: Directory is auto-created by both `logger.ts` and `storage.ts` on startup. If permissions are wrong, check the process user.
-- **Dashboard shows 0 events**: Verify backend is running on port 3456 (`bun src/index.ts`). The dashboard proxy reads `BACKEND_URL` env var (defaults to `http://127.0.0.1:3456`).
-- **SSE shows "Connecting…" forever**: Check backend is up. The `LiveStream` component auto-reconnects with exponential backoff (3s → 30s cap) via EventSource.
+- **SSE shows "Connecting…" forever**: Check the server is up. Clients should implement exponential backoff (3s → 30s cap) on `EventSource` reconnects.
 - **SQLite "database is locked"**: WAL mode is on; concurrent readers are safe. A write conflict under heavy load would be transient — the `catch {}` in `insertEvent()` swallows it without crashing.
 - **Log file names are `app.1.log` not `app.log`**: This is pino-roll v4 behavior. The suffix increments on each rotation. Use a glob like `app.*.log` to tail all rotations.
 - **pino-roll streams not ready on first request**: Streams are built asynchronously; the synchronous stdout logger is active immediately. File writes land within ~1s of startup and are available for all subsequent requests.
+- **`journalctl -u claude-plan-api` is quiet**: Confirm you are on commit `0bcaf20` or later — earlier code gated stdout behind `NODE_ENV !== production`, which made the journal silent under systemd. The current logger always includes stdout.

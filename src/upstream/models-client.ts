@@ -32,7 +32,7 @@ export interface UpstreamModel {
   outputEffort: boolean;
   structuredOutputs: boolean;
 
-  // Content/input capabilities. Useful for dashboard display and pre-flight
+  // Content/input capabilities. Useful for API consumers and pre-flight
   // validation (e.g. reject images routed to an image-less model).
   imageInput: boolean;
   pdfInput: boolean;

@@ -2,8 +2,9 @@
 //
 // The endpoint returns three top-level objects: account, organization,
 // application. Historically the proxy only captured account.uuid and a
-// handful of log fields. We now cache the entire profile so the dashboard
-// and pre-flight checks (e.g. has_extra_usage_enabled) can consume it.
+// handful of log fields. We now cache the entire profile so the audit API
+// (GET /api/account/profile) and pre-flight checks (e.g. has_extra_usage_enabled)
+// can consume it.
 
 import { getCredentials } from "./credentials.ts";
 import { SESSION_ID, DEVICE_ID } from "../session.ts";
@@ -68,8 +69,8 @@ export async function ensureProfile(): Promise<FullProfile | null> {
 }
 
 /**
- * Force a refresh of the cached profile. Used by the dashboard /
- * admin endpoint.
+ * Force a refresh of the cached profile. Exposed for future admin endpoints
+ * that need a fresh read-through without restarting the service.
  */
 export async function refreshProfile(): Promise<FullProfile | null> {
   const fresh = await fetchProfile();

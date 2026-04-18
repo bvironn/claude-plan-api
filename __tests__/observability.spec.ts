@@ -67,46 +67,6 @@ test("health endpoint logs request through full pipeline", async () => {
   db.close();
 });
 
-test("frontend click event → POST /api/telemetry → SQLite → /logs query", async () => {
-  const payload = {
-    events: [
-      {
-        timestamp: new Date().toISOString(),
-        level: "info",
-        event: "ui.click",
-        sessionId: "test-session-xyz",
-        traceId: "test-trace-xyz",
-        payload: {
-          selector: "button#export",
-          text: "Export",
-          x: 100,
-          y: 200,
-          pageUrl: "/observability",
-        },
-      },
-    ],
-  };
-  const res = await fetch(`${BASE}/api/telemetry`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  expect(res.status).toBe(200);
-  const body = (await res.json()) as { ok: boolean; count: number };
-  expect(body.ok).toBe(true);
-  expect(body.count).toBe(1);
-
-  await Bun.sleep(200);
-
-  // verify via /logs query (this is what the dashboard would do)
-  const logsRes = await fetch(`${BASE}/api/telemetry/logs?event=ui.click&limit=10`);
-  const logs = (await logsRes.json()) as { events: Array<{ traceId?: string; event: string; payload: Record<string, unknown> }> };
-  const found = logs.events.find((e) => e.traceId === "test-trace-xyz");
-  expect(found).toBeTruthy();
-  expect(found!.payload.selector).toBe("button#export");
-  expect(found!.payload.text).toBe("Export");
-});
-
 test("SSE stream receives live events", async () => {
   const received: any[] = [];
   const ctrl = new AbortController();
@@ -170,53 +130,4 @@ test("export CSV returns attachment with headers", async () => {
   expect(firstLine).toContain("event");
 });
 
-test("anti-loop guard logs tool errors", async () => {
-  // Post a guard.toolError event through the ingest API — the same path the
-  // real anti-loop guard uses — and verify it lands in SQLite via /logs.
-  const traceId = `guard-test-${Date.now()}`;
-  const res = await fetch(`${BASE}/api/telemetry`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      events: [
-        {
-          timestamp: new Date().toISOString(),
-          level: "warn",
-          event: "guard.toolError",
-          traceId,
-          sessionId: "test-guard-session",
-          payload: { tool: "Bash", consecutiveErrors: 2 },
-        },
-      ],
-    }),
-  });
-  expect(res.status).toBe(200);
-  const body = (await res.json()) as { ok: boolean; count: number };
-  expect(body.ok).toBe(true);
-  expect(body.count).toBe(1);
 
-  await Bun.sleep(200);
-
-  // verify via /logs API
-  const logsRes = await fetch(
-    `${BASE}/api/telemetry/logs?event=guard.toolError&limit=5`
-  );
-  const logs = (await logsRes.json()) as { events: Array<{ traceId?: string; event: string }> };
-  const found = logs.events.find((e) => e.traceId === traceId);
-  expect(found).toBeTruthy();
-  expect(found!.event).toBe("guard.toolError");
-});
-
-test("frontend fetch interception skips x-telemetry-internal", async () => {
-  // Verify the ingest endpoint accepts the x-telemetry-internal header gracefully.
-  // This header is set by the frontend buffer to avoid infinite capture loops.
-  const res = await fetch(`${BASE}/api/telemetry`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-telemetry-internal": "1",
-    },
-    body: JSON.stringify({ events: [] }),
-  });
-  expect(res.status).toBe(200);
-});

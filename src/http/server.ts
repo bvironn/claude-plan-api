@@ -11,7 +11,6 @@ import {
   handleTelemetryRequests,
   handleTelemetryRequestById,
   handleTelemetryExport,
-  handleTelemetryIngest,
 } from "./routes/telemetry/index.ts";
 import { withObservability } from "../observability/middleware.ts";
 import { emit } from "../observability/logger.ts";
@@ -46,8 +45,7 @@ export function startServer() {
         if (method === "POST" && pathname === "/v1/tokens/count") return await observedTokensCount(req);
         if (method === "GET" && pathname === "/api/account/profile") return await observedAccountProfile(req);
 
-        // Telemetry API
-        if (method === "POST" && pathname === "/api/telemetry") return await handleTelemetryIngest(req);
+        // Telemetry API (audit-only, GET-dominant — no client-side ingest)
         if (method === "GET" && pathname === "/api/telemetry/logs") return await handleTelemetryLogs(req);
         if (method === "GET" && pathname === "/api/telemetry/stream") return await handleTelemetryStream(req);
         if (method === "GET" && pathname === "/api/telemetry/metrics") return await handleTelemetryMetrics(req);
