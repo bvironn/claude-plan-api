@@ -137,7 +137,7 @@ describe("storage — upstream_request_body persistence", () => {
 
     const row = getRequestByTrace("trace-insert-1");
     expect(row).not.toBeNull();
-    expect((row as Record<string, unknown>).upstream_request_body).toBe(upstreamJson);
+    expect((row as unknown as Record<string, unknown>).upstream_request_body).toBe(upstreamJson);
   });
 
   it("REQ-4: updateRequest can patch upstream_request_body on an existing row", () => {
@@ -145,13 +145,13 @@ describe("storage — upstream_request_body persistence", () => {
     insertRequest({ trace_id: "trace-update-1", timestamp: "2026-04-18T00:00:00Z" });
 
     // Initially null
-    const before = getRequestByTrace("trace-update-1") as Record<string, unknown>;
+    const before = getRequestByTrace("trace-update-1") as unknown as Record<string, unknown>;
     expect(before.upstream_request_body).toBeNull();
 
     const upstreamJson = '{"model":"claude-opus-4-7","thinking":{"type":"adaptive"}}';
     updateRequest("trace-update-1", { upstream_request_body: upstreamJson });
 
-    const after = getRequestByTrace("trace-update-1") as Record<string, unknown>;
+    const after = getRequestByTrace("trace-update-1") as unknown as Record<string, unknown>;
     expect(after.upstream_request_body).toBe(upstreamJson);
   });
 
