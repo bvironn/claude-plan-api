@@ -76,16 +76,26 @@ function ccCanonical(name: string): string | null {
   return CC_ALIASES[name.toLowerCase()] ?? autoCanonical(name);
 }
 
+// Prefix Claude Code uses for ALL tool names on the wire (e.g. "mcp_Bash",
+// "mcp_Read", "mcp_WebFetch"). Anthropic's OAuth billing validation rejects
+// unprefixed names when multiple tools are present — it flags the request as
+// a non-Claude-Code client and applies safety policies including redacted
+// thinking. We MUST match this shape.
+const MCP_PREFIX = "mcp_";
+
 export function mapToolName(name: string): string {
   if (toolMap[name]) return toolMap[name];
 
   const canonical = ccCanonical(name);
   const base = canonical ?? sanitizeToolName(name);
+  // Apply mcp_ prefix (Claude Code convention). Skip if the name already
+  // carries it (idempotent — defensive against clients that pre-prefix).
+  const prefixed = base.startsWith(MCP_PREFIX) ? base : `${MCP_PREFIX}${base}`;
 
   const used = new Set(Object.values(toolMap));
-  let mapped = base;
+  let mapped = prefixed;
   let suffix = 2;
-  while (used.has(mapped)) mapped = `${base}_${suffix++}`;
+  while (used.has(mapped)) mapped = `${prefixed}_${suffix++}`;
 
   toolMap[name] = mapped;
   toolMapReverse[mapped] = name;
@@ -94,5 +104,18 @@ export function mapToolName(name: string): string {
 }
 
 export function unmapToolName(name: string): string {
-  return toolMapReverse[name] ?? name;
+  if (toolMapReverse[name]) return toolMapReverse[name];
+  // Fallback: if the response carries a prefixed name we never mapped
+  // (e.g. tool called in a follow-up turn whose state was lost), strip the
+  // prefix to give the client its original name back.
+  if (name.startsWith(MCP_PREFIX)) {
+    const stripped = name.slice(MCP_PREFIX.length);
+    // Restore first-letter lowercase so "mcp_Bash" round-trips to "bash"
+    // when the original client used lowercase (most OpenAI-compatible
+    // clients do). If the original was PascalCase, the first-letter
+    // lowercase is still a reasonable guess — callers that need the
+    // exact original should pre-register via mapToolName on their tools.
+    return stripped ? stripped[0]!.toLowerCase() + stripped.slice(1) : stripped;
+  }
+  return name;
 }

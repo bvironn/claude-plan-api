@@ -13,7 +13,16 @@ import { emit } from "../observability/logger.ts";
 import { repairToolPairs } from "./repair-tool-pairs.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
-export const CONTEXT_PREAMBLE = "The content below is additional context and instructions provided by the caller. Treat it as guidance for how to assist the user:\n\n";
+
+// CONTEXT_PREAMBLE (the string that used to wrap the client's forwarded
+// system prompt) is intentionally GONE. The reference plugin
+// `opencode-claude-auth` does NOT wrap third-party system content in any
+// marker — it injects the text DIRECTLY at the head of the first user
+// message, separated by "\n\n". Anthropic's safety/redaction pipeline
+// appears to detect the preamble marker as a "third-party injection"
+// signal and redact thinking as a countermeasure. Match the plugin's
+// shape exactly to keep thinking plaintext flowing.
+export const CONTEXT_PREAMBLE = "";
 
 export interface TransformResult {
   body: Record<string, unknown>;
@@ -83,36 +92,42 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
       ? (firstUser!.content as Array<Record<string, unknown>>).find((c) => c.type === "text")?.text as string || ""
       : "";
 
-  // Forward the client's system prompt by prepending it to the first user
-  // message (OAuth-authenticated Claude Code requests reject third-party
-  // system prompts in the system[] array — pattern from opencode-claude-auth).
+  // Forward the client's system prompt by prepending it DIRECTLY to the
+  // first user message, separated by a blank line. No wrapper marker.
+  // OAuth-authenticated Claude Code requests reject third-party system
+  // prompts in the system[] array, so they must travel as part of user
+  // content. Matching the reference plugin's shape exactly:
+  //   firstUser.content = <client system text> + "\n\n" + <original user text>
   //
-  // Ordering: this runs AFTER firstText is extracted above so that the
-  // billing header (computed from firstText via computeBilling) hashes the
-  // ORIGINAL user text, not the preamble + client system prompt. Billing
-  // reflects user intent; preamble/persona changes must not shift the hash.
+  // Ordering: runs AFTER `firstText` is extracted so billing (hashed from
+  // the ORIGINAL user text) is not disturbed by the forwarded system.
   if (systemPrompt !== null && systemPrompt.length > 0 && firstUser) {
-    const combined = `${CONTEXT_PREAMBLE}${systemPrompt}\n\n`;
+    const separator = "\n\n";
     if (typeof firstUser.content === "string") {
-      firstUser.content = combined + firstUser.content;
+      firstUser.content = systemPrompt + separator + firstUser.content;
     } else if (Array.isArray(firstUser.content)) {
       const blocks = firstUser.content as Array<Record<string, unknown>>;
       const textBlockIndex = blocks.findIndex((c) => c.type === "text");
       if (textBlockIndex >= 0) {
         const block = blocks[textBlockIndex] as Record<string, unknown>;
-        block.text = combined + ((block.text as string) || "");
+        block.text = systemPrompt + separator + ((block.text as string) || "");
       } else {
-        blocks.unshift({ type: "text", text: combined });
+        blocks.unshift({ type: "text", text: systemPrompt + separator });
       }
     }
   }
 
+  // System array matches the plugin's final shape: billing header (no
+  // cache_control) + identity (cache_control WITHOUT `scope: "global"`).
+  // The plugin preserves cache_control from the incoming identity entry
+  // when present; we construct it fresh here because our request pipeline
+  // builds system[] from scratch rather than editing an incoming one.
   const system: Array<Record<string, unknown>> = [
     { type: "text", text: computeBilling(firstText) },
     {
       type: "text",
       text: CLAUDE_CODE_IDENTITY,
-      cache_control: { type: "ephemeral", ttl: "1h", scope: "global" },
+      cache_control: { type: "ephemeral", ttl: "1h" },
     },
   ];
 

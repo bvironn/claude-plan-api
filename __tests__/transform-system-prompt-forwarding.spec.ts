@@ -76,7 +76,8 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0]!.type).toBe("text");
     expect(blocks[0]!.text).toBe("hi");
-    expect((blocks[0]!.text as string).startsWith(CONTEXT_PREAMBLE)).toBe(false);
+    // CONTEXT_PREAMBLE is now "" (aligned with the plugin). The absence of
+    // a client system prompt is simply tested by the text equality above.
   });
 
   // --- REQ-4: No injection on empty system prompt ---
@@ -93,7 +94,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     const blocks = msg.content as Block[];
     const textBlock = blocks.find((b) => b.type === "text")!;
     expect(textBlock.text).toBe("hi");
-    expect((textBlock.text as string).includes(CONTEXT_PREAMBLE)).toBe(false);
+    // Empty-string system is equivalent to no system (tested by text=="hi").
   });
 
   // --- REQ-5: Handle string content on first user message ---
@@ -176,9 +177,11 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     // Only the assistant survives; no user message was synthesized.
     expect(messages).toHaveLength(1);
     expect(messages[0]!.role).toBe("assistant");
-    // And the client system text never appears anywhere in the final body.
+    // Client system "A" never appears in the body because there's no user
+    // message to prepend it to. Verify "A" is gone.
     const serialized = JSON.stringify(body);
-    expect(serialized.includes(CONTEXT_PREAMBLE)).toBe(false);
+    expect(serialized.includes("\"A\"")).toBe(false);
+    expect(serialized.includes("A\\n\\n")).toBe(false);
   });
 
   // --- REQ-9: Prefix only the first user message ---
@@ -212,7 +215,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(firstText.startsWith(`${CONTEXT_PREAMBLE}A\n\n`)).toBe(true);
     expect(firstText).toBe(`${CONTEXT_PREAMBLE}A\n\nfirst`);
 
-    // Second user turn must be untouched — plain string "second", no preamble.
+    // Second user turn must be untouched — plain string "second", no prefix.
     // Note: addCacheControlToLastUserText converts the LAST user text to an
     // array-with-cache-control. So messages[2].content is an array with one
     // text block whose text === "second".
@@ -223,7 +226,8 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
       const secondBlocks = secondContent as Block[];
       const secondText = (secondBlocks.find((b) => b.type === "text")!.text as string);
       expect(secondText).toBe("second");
-      expect(secondText.includes(CONTEXT_PREAMBLE)).toBe(false);
+      // Also verify the client system "A" didn't leak into the later turn.
+      expect(secondText.startsWith("A\n\n")).toBe(false);
     }
   });
 
