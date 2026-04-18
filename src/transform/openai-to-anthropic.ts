@@ -14,6 +14,19 @@ import { repairToolPairs } from "./repair-tool-pairs.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
+/**
+ * Budget tokens per effort level. Mirrors the budgets the official Claude
+ * Code CLI uses for its "think" / "think hard" / "think harder" /
+ * "ultrathink" triggers. Values are floor + per-step ramp; Anthropic caps
+ * them per-model internally if they exceed what the model allows.
+ */
+const EFFORT_TO_BUDGET: Record<string, number> = {
+  low: 2_048,
+  medium: 4_096,
+  high: 8_192,
+  max: 16_000,
+};
+
 // CONTEXT_PREAMBLE (the string that used to wrap the client's forwarded
 // system prompt) is intentionally GONE. The reference plugin
 // `opencode-claude-auth` does NOT wrap third-party system content in any
@@ -158,9 +171,38 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 
   const caps = getModelCapabilities(model);
 
-  if (caps.adaptiveThinking && !isStructuredOutput) {
-    result.thinking = { type: "adaptive" };
+  // --- Thinking / effort mode selection ---
+  //
+  // Departure from the previous "always adaptive" approach. The reference
+  // plugin `opencode-claude-auth` works because it runs against OpenCode's
+  // NATIVE anthropic provider, which sends `thinking: {type:"enabled",
+  // budget_tokens:N}` directly — the form that actually forces plaintext
+  // `thinking_delta` streaming.
+  //
+  // We're an openai-compatible proxy, so we receive `reasoning_effort` and
+  // MUST translate. The previous translation (`thinking: adaptive` +
+  // `output_config.effort`) produced empty-plaintext thinking blocks —
+  // adaptive mode decided the prompts didn't merit streaming CoT.
+  //
+  // Rules:
+  //   A. adaptiveThinking + effort        → thinking.enabled{budget}
+  //   B. adaptiveThinking + no effort     → thinking.adaptive (model decides)
+  //   C. outputEffort only (no adaptive)  → output_config.effort
+  //   D. structured output                → neither (schema mode suppresses)
+  //
+  // thinking.enabled and output_config.effort are mutually exclusive —
+  // budget_tokens already expresses effort intent.
+  let usedEnabledThinking = false;
+  if (!isStructuredOutput && caps.adaptiveThinking) {
+    if (effectiveEffort !== null) {
+      const budget = EFFORT_TO_BUDGET[effectiveEffort] ?? 4096;
+      result.thinking = { type: "enabled", budget_tokens: budget };
+      usedEnabledThinking = true;
+    } else {
+      result.thinking = { type: "adaptive" };
+    }
   }
+
   if (caps.contextManagement && !isStructuredOutput) {
     // Pick the edit type from the upstream declaration rather than hardcoding.
     // Future models may drop clear_thinking_20251015 or add new edits; this
@@ -172,7 +214,16 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
       };
     }
   }
-  if (caps.outputEffort && !isStructuredOutput && effectiveEffort !== null) {
+
+  // Case C: emit output_config.effort only when we did NOT use
+  // thinking.enabled. When enabled is active, budget_tokens already
+  // expresses intent and effort would be redundant/conflicting.
+  if (
+    caps.outputEffort &&
+    !isStructuredOutput &&
+    effectiveEffort !== null &&
+    !usedEnabledThinking
+  ) {
     result.output_config = { effort: effectiveEffort };
   }
 

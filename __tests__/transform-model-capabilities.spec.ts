@@ -236,14 +236,25 @@ describe("openaiToAnthropic — model capability gating", () => {
 });
 
 describe("openaiToAnthropic — effort variants", () => {
-  // --- Body → output_config.effort (OpenAI dialect) ---
-  test("reasoning_effort=high in body → output_config.effort=high", () => {
+  // For models with adaptive thinking (sonnet-4-6, opus-4-6, opus-4-7),
+  // effort is translated to thinking.enabled + budget_tokens, NOT to
+  // output_config.effort. This is the key fix that unlocks thinking
+  // plaintext streaming (previously effort was emitted alongside adaptive
+  // which Anthropic silently produced empty thinking for).
+  //
+  // Budget mapping: low=2048, medium=4096, high=8192, max=16000.
+  // These are the same budgets the official Claude CLI uses for its
+  // "think", "think hard", "think harder", "ultrathink" triggers.
+
+  // --- Body top-level reasoning_effort ---
+  test("reasoning_effort=high in body → thinking.enabled budget=8192, no output_config.effort", () => {
     const { body } = openaiToAnthropic({
       model: "claude-sonnet-4-6",
       reasoning_effort: "high",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "high" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+    expect(body.output_config).toBeUndefined();
   });
 
   // --- Body → options.reasoning_effort (AI SDK v4 / OpenCode convention) ---
@@ -251,22 +262,24 @@ describe("openaiToAnthropic — effort variants", () => {
   // Vercel's @ai-sdk/openai-compatible nests provider params under `options`.
   // OpenCode sends { ..., options: { reasoning_effort: "max" } }. Without
   // this path the user selector :max silently does nothing.
-  test("options.reasoning_effort=max (AI SDK nested) → output_config.effort=max", () => {
+  test("options.reasoning_effort=max (AI SDK nested) → thinking.enabled budget=16000", () => {
     const { body } = openaiToAnthropic({
       model: "claude-sonnet-4-6",
       options: { reasoning_effort: "max" },
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "max" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 16000 });
+    expect(body.output_config).toBeUndefined();
   });
 
-  test("options.effort=low (AI SDK alt) → output_config.effort=low", () => {
+  test("options.effort=low (AI SDK alt) → thinking.enabled budget=2048", () => {
     const { body } = openaiToAnthropic({
       model: "claude-sonnet-4-6",
       options: { effort: "low" },
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "low" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+    expect(body.output_config).toBeUndefined();
   });
 
   test("top-level reasoning_effort wins over nested options.reasoning_effort", () => {
@@ -276,34 +289,35 @@ describe("openaiToAnthropic — effort variants", () => {
       options: { reasoning_effort: "low" },
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "high" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
   });
 
-  test("output_config.effort=max in body (Anthropic dialect) → kept", () => {
+  test("output_config.effort=max in body (Anthropic dialect) → thinking.enabled budget=16000", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-6",
       output_config: { effort: "max" },
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "max" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 16000 });
+    expect(body.output_config).toBeUndefined();
   });
 
-  // --- Suffix → output_config.effort (OpenRouter dialect) ---
-  test("model id with :high suffix → effort=high, base id resolved", () => {
+  // --- Suffix → thinking.enabled (OpenRouter dialect) ---
+  test("model id with :high suffix → thinking.enabled budget=8192, base id resolved", () => {
     const { body } = openaiToAnthropic({
       model: "claude-opus-4-6:high",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "high" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
     expect(body.model).toBe("claude-opus-4-6"); // suffix stripped
   });
 
-  test("model id with :max suffix on model that supports max → kept", () => {
+  test("model id with :max suffix on model that supports max → thinking.enabled budget=16000", () => {
     const { body } = openaiToAnthropic({
       model: "claude-sonnet-4-6:max",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "max" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 16000 });
   });
 
   // --- Precedence: body wins over suffix ---
@@ -313,7 +327,7 @@ describe("openaiToAnthropic — effort variants", () => {
       reasoning_effort: "max",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(body.output_config).toEqual({ effort: "max" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 16000 });
   });
 
   // --- "default" sentinel → omit effort ---
