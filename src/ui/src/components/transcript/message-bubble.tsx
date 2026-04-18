@@ -112,8 +112,6 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({ role, content, toolCalls, toolCallId, name }: MessageBubbleProps) {
   const blocks = normaliseContent(content)
-  const side = role === "user" || role === "tool" ? "left" : "left" // Always left-aligned for audit readability
-  const isUser = role === "user"
 
   // Classify blocks to decide rendering.
   const textBlocks = blocks.filter((b) => b.type === "text" || (!b.type && typeof b.text === "string"))
@@ -122,15 +120,43 @@ export function MessageBubble({ role, content, toolCalls, toolCallId, name }: Me
   const thinkingBlocks = blocks.filter((b) => b.type === "thinking" || b.type === "redacted_thinking")
   const imageBlocks = blocks.filter(isImageBlock)
 
+  // Visual role overrides the semantic role when the message is PRIMARILY
+  // tool I/O. Anthropic packs tool_result into role="user" and tool_use into
+  // role="assistant", but for audit readability the operator cares about the
+  // role of the CONTENT, not the protocol lane. Rules:
+  //   - role=user with content = exclusively tool_result   → visual "tool"
+  //   - role=assistant with only tool_use (no text)        → visual "tool"
+  //   - otherwise                                          → visual matches role
+  const onlyToolResults =
+    role === "user" &&
+    toolResultBlocks.length > 0 &&
+    textBlocks.length === 0 &&
+    imageBlocks.length === 0 &&
+    thinkingBlocks.length === 0
+  const onlyToolCalls =
+    role === "assistant" &&
+    textBlocks.length === 0 &&
+    thinkingBlocks.length === 0 &&
+    imageBlocks.length === 0 &&
+    (toolUseBlocks.length > 0 || (toolCalls && toolCalls.length > 0))
+  const visualRole: Role = onlyToolResults || onlyToolCalls ? "tool" : role
+
+  const isUser = visualRole === "user"
+
   return (
-    <div className={cn("flex gap-3", side === "left" ? "flex-row" : "flex-row-reverse")}>
-      <RoleAvatar role={role} />
+    <div className="flex gap-3">
+      <RoleAvatar role={visualRole} />
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="text-muted-foreground flex items-center gap-2 text-xs">
-          <span className="capitalize">{role}</span>
+          <span className="capitalize">{visualRole}</span>
           {name && (
             <Badge variant="outline" className="font-mono font-normal">
               {name}
+            </Badge>
+          )}
+          {(onlyToolResults || onlyToolCalls) && (
+            <Badge variant="outline" className="font-normal text-[10px]">
+              role={role} · rendered as tool
             </Badge>
           )}
         </div>

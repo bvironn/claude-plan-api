@@ -113,7 +113,12 @@ export function useEventStream({
         delayRef.current = initialReconnectDelayMs // reset backoff on a successful open
       }
 
-      es.onmessage = (msg: MessageEvent) => {
+      // The gateway emits events with a specific name (`event: telemetry`).
+      // EventSource.onmessage ONLY fires for unnamed events — named events
+      // need addEventListener. This is the single easiest bug to miss with
+      // EventSource. See backend: src/observability/event-bus.ts and the
+      // SSE formatter in routes/telemetry/stream.ts.
+      const onTelemetry = (msg: MessageEvent) => {
         if (cancelled) return
         try {
           const parsed = JSON.parse(msg.data) as TelemetryEvent
@@ -122,10 +127,16 @@ export function useEventStream({
           // Malformed payload — drop silently. (The backend emits valid JSON.)
         }
       }
+      es.addEventListener("telemetry", onTelemetry)
+
+      // Keep a plain onmessage handler too as a fallback: if the backend
+      // ever emits unnamed events, we still capture them.
+      es.onmessage = onTelemetry
 
       es.onerror = () => {
         if (cancelled) return
         // EventSource auto-reconnects, but we want explicit backoff + status.
+        es.removeEventListener("telemetry", onTelemetry)
         es.close()
         esRef.current = null
         setStatus("reconnecting")

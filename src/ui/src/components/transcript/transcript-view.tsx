@@ -6,10 +6,10 @@ import { SystemBlocks } from "@/components/transcript/system-blocks"
 import type {
   AnthropicRequestBody,
   OpenAIChatRequestBody,
-  OpenAIChatResponseBody,
   RequestRecord,
 } from "@/lib/types"
 import { parseOrNull } from "@/lib/format"
+import { parseResponseBody } from "@/lib/sse-parser"
 
 /**
  * Transcript view — renders a full `POST /v1/chat/completions` cycle as a
@@ -31,7 +31,10 @@ export function TranscriptView({ record }: { record: RequestRecord }) {
   const { systemBlocks, messages, responseMessage, reasoningText, reasoningDetails } = useMemo(() => {
     const upstream = parseOrNull<AnthropicRequestBody>(record.upstreamRequestBody)
     const clientReq = parseOrNull<OpenAIChatRequestBody>(record.requestBody)
-    const response = parseOrNull<OpenAIChatResponseBody>(record.responseBody)
+    // parseResponseBody handles BOTH shapes: JSON (non-streaming) and raw
+    // Anthropic SSE bytes (streaming). The gateway stores whatever came off
+    // the upstream socket, so streaming requests have event/data framing.
+    const response = parseResponseBody(record.responseBody)
 
     // System — prefer upstream (has the final shape), else empty
     const systemBlocks = (upstream?.system ?? []) as Array<{
