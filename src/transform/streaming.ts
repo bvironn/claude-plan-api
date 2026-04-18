@@ -42,6 +42,20 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   let pendingCancelReason: string | null = null;
   let pendingCancelAt: number | null = null;
 
+  // Thinking-passthrough state: for each active `thinking` or `redacted_thinking`
+  // content block, track the running plaintext + signature (or opaque ciphertext
+  // for redacted). On `content_block_stop` we emit one chunk with the fully
+  // assembled RAW block in `delta.reasoning_details` so clients can echo it in
+  // multi-turn requests — Anthropic requires the original signature to accept
+  // thinking blocks on follow-up turns.
+  let activeThinkingBlock: {
+    index: number;
+    type: "thinking" | "redacted_thinking";
+    thinking: string;
+    signature: string;
+    data: string;
+  } | null = null;
+
   const safeEnqueue = (controller: ReadableStreamDefaultController, data: string): boolean => {
     if (closed) return false;
     if (pendingCancel) return true; // client gone — silently drop but keep loop alive
@@ -85,20 +99,50 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
               usage.cache_read_input_tokens = event.message.usage.cache_read_input_tokens || 0;
               usage.cache_creation_input_tokens = event.message.usage.cache_creation_input_tokens || 0;
             }
-          } else if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
-            toolIndex++;
-            inToolUse = true;
-            toolUseBlockIndex = typeof event.index === "number" ? event.index : null;
-            const name = unmapToolName(event.content_block.name);
-            if (!safeEnqueue(controller, chunk({
-              id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-              choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: event.content_block.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
-            }))) return "break";
-            sentRole = true;
+          } else if (event.type === "content_block_start") {
+            const cb = event.content_block as Record<string, unknown> | undefined;
+            const cbType = cb?.type as string | undefined;
+            if (cbType === "tool_use") {
+              toolIndex++;
+              inToolUse = true;
+              toolUseBlockIndex = typeof event.index === "number" ? event.index : null;
+              const name = unmapToolName(cb!.name as string);
+              if (!safeEnqueue(controller, chunk({
+                id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: cb!.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],
+              }))) return "break";
+              sentRole = true;
+            } else if (cbType === "thinking") {
+              activeThinkingBlock = {
+                index: typeof event.index === "number" ? event.index : -1,
+                type: "thinking",
+                thinking: (cb!.thinking as string) ?? "",
+                signature: (cb!.signature as string) ?? "",
+                data: "",
+              };
+            } else if (cbType === "redacted_thinking") {
+              activeThinkingBlock = {
+                index: typeof event.index === "number" ? event.index : -1,
+                type: "redacted_thinking",
+                thinking: "",
+                signature: "",
+                data: (cb!.data as string) ?? "",
+              };
+            }
           } else if (event.type === "content_block_stop") {
             if (toolUseBlockIndex !== null && event.index === toolUseBlockIndex) {
               inToolUse = false;
               toolUseBlockIndex = null;
+            }
+            if (activeThinkingBlock !== null && event.index === activeThinkingBlock.index) {
+              const rawBlock = activeThinkingBlock.type === "thinking"
+                ? { type: "thinking", thinking: activeThinkingBlock.thinking, signature: activeThinkingBlock.signature }
+                : { type: "redacted_thinking", data: activeThinkingBlock.data };
+              if (!safeEnqueue(controller, chunk({
+                id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { reasoning_details: [rawBlock] }, finish_reason: null }],
+              }))) return "break";
+              activeThinkingBlock = null;
             }
           } else if (event.type === "content_block_delta") {
             if (event.delta?.type === "input_json_delta" && event.delta.partial_json) {
@@ -106,6 +150,19 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
                 id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                 choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, function: { arguments: event.delta.partial_json } }] }, finish_reason: null }],
               }))) return "break";
+            } else if (event.delta?.type === "thinking_delta" && typeof event.delta.thinking === "string" && activeThinkingBlock?.type === "thinking") {
+              // Accumulate into the active block AND stream the chunk to the client
+              // so AI SDK (@ai-sdk/openai-compatible) can render reasoning progressively.
+              activeThinkingBlock.thinking += event.delta.thinking;
+              if (!safeEnqueue(controller, chunk({
+                id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), reasoning_content: event.delta.thinking }, finish_reason: null }],
+              }))) return "break";
+              sentRole = true;
+            } else if (event.delta?.type === "signature_delta" && typeof event.delta.signature === "string" && activeThinkingBlock) {
+              // Accumulate into active block only — signatures are emitted as a unit
+              // at content_block_stop, not streamed character-by-character.
+              activeThinkingBlock.signature += event.delta.signature;
             } else if (event.delta?.text) {
               if (!safeEnqueue(controller, chunk({
                 id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,

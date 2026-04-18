@@ -39,6 +39,7 @@ export interface RequestRecord {
   cache_creation_tokens?: number;
   request_body?: string;
   response_body?: string;
+  upstream_request_body?: string | null;
   error?: string;
 }
 

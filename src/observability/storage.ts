@@ -56,12 +56,32 @@ export function initStorage(): void {
       cache_creation_tokens INTEGER,
       request_body TEXT,
       response_body TEXT,
+      upstream_request_body TEXT,
       error TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
     CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
     CREATE INDEX IF NOT EXISTS idx_requests_path ON requests(path);
   `);
+
+  // Idempotent additive migrations for DBs created before a column existed.
+  // Pattern: check PRAGMA table_info, ALTER TABLE ADD COLUMN if missing.
+  // Safe to call on every startup — no-op on fresh DBs (column already in CREATE).
+  ensureColumn("requests", "upstream_request_body", "TEXT");
+}
+
+/**
+ * Add a column to `table` if it does not already exist. Use for additive
+ * schema migrations on previously-created SQLite files. Call from inside
+ * `initStorage()` after the `CREATE TABLE IF NOT EXISTS` block.
+ *
+ * Idempotent: rows retain their values; no data loss. Fresh DBs skip the
+ * ALTER because the column is already present from `CREATE TABLE`.
+ */
+function ensureColumn(table: string, column: string, type: string): void {
+  const rows = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+  if (rows.some((r) => r.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
 // Prepared statements — initialised lazily after initStorage() is called
@@ -83,13 +103,14 @@ function getInsertRequest() {
   return db.prepare<void, [
     string, string, string | null, string | null, number | null, number | null,
     string | null, string | null, string | null, number | null, number | null,
-    number | null, number | null, number | null, string | null, string | null, string | null
+    number | null, number | null, number | null, string | null, string | null,
+    string | null, string | null
   ]>(`
     INSERT OR IGNORE INTO requests
       (trace_id, timestamp, method, path, status, duration_ms, ip, user_agent, model,
        is_stream, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-       request_body, response_body, error)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       request_body, response_body, upstream_request_body, error)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 }
 
@@ -138,6 +159,7 @@ export function insertRequest(r: RequestRecord): void {
       r.cache_creation_tokens ?? null,
       r.request_body ?? null,
       r.response_body ?? null,
+      r.upstream_request_body ?? null,
       r.error ?? null
     );
   } catch {}

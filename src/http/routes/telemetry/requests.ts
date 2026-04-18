@@ -33,6 +33,7 @@ function toCamel(r: Record<string, unknown>): Record<string, unknown> {
     cacheCreationTokens: r.cache_creation_tokens ?? undefined,
     requestBody: r.request_body,
     responseBody: r.response_body,
+    upstreamRequestBody: r.upstream_request_body ?? null,
     error: r.error,
     ip: r.ip,
     userAgent: r.user_agent,

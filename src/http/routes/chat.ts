@@ -33,10 +33,19 @@ export async function handleChat(req: Request): Promise<Response> {
   const model = anthropicBody.model as string;
   const isStream = anthropicBody.stream as boolean;
 
-  // Record model + stream flag on the request record early
+  // Record model + stream flag + post-transform upstream body on the request
+  // record EARLY (before the upstream fetch). Capturing `upstream_request_body`
+  // here is what lets operators verify via telemetry that fields like
+  // `thinking` and `output_config` are actually being injected into the
+  // Anthropic request — the incoming client `request_body` alone does not
+  // show what finally went upstream.
   const trace = currentTrace();
   if (trace?.traceId) {
-    updateRequest(trace.traceId, { model, is_stream: isStream ? 1 : 0 });
+    updateRequest(trace.traceId, {
+      model,
+      is_stream: isStream ? 1 : 0,
+      upstream_request_body: JSON.stringify(anthropicBody).slice(0, 5 * 1024 * 1024),
+    });
   }
 
   const res = await callAnthropic(anthropicBody, { model, isStream, isStructuredOutput });
