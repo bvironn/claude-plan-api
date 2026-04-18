@@ -7,11 +7,25 @@ export function buildBetas(
   isStructuredOutput = false,
   excluded?: Set<string>,
 ): string {
+  // NOTE on `redact-thinking-2026-02-12`: intentionally OMITTED.
+  //
+  // That beta instructs Anthropic to emit thinking blocks with empty
+  // `thinking` plaintext + a signed ciphertext (only the signature arrives
+  // on the wire). The official Claude Code CLI enables it for privacy
+  // reasons — their UX hides chain-of-thought by design. Our gateway is an
+  // AUDIT proxy; the operator explicitly wants the plaintext to render it
+  // in the dashboard's Reasoning block. Removing the beta makes Anthropic
+  // stream real `thinking_delta` events, which `anthropic-to-openai` +
+  // `streaming.ts` already know how to propagate to the client as
+  // `reasoning_content`.
+  //
+  // `interleaved-thinking-2025-05-14` stays — it's a separate beta that
+  // lets thinking blocks interleave with tool_use blocks in a single
+  // response (required for modern agent flows).
   if (isStructuredOutput) {
     const parts = [
       "oauth-2025-04-20",
       "interleaved-thinking-2025-05-14",
-      "redact-thinking-2026-02-12",
       "context-management-2025-06-27",
       "prompt-caching-scope-2026-01-05",
       "advisor-tool-2026-03-01",
@@ -24,7 +38,6 @@ export function buildBetas(
     "claude-code-20250219",
     "oauth-2025-04-20",
     "interleaved-thinking-2025-05-14",
-    "redact-thinking-2026-02-12",
     "context-management-2025-06-27",
     "prompt-caching-scope-2026-01-05",
     "advisor-tool-2026-03-01",
