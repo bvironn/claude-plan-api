@@ -1,137 +1,187 @@
 # claude-plan-api
 
-OpenAI-compatible gateway for Claude Max/Pro, with first-class observability. Ships with an audit dashboard (React + TanStack Router + shadcn/ui) and the raw HTTP API + SQLite store for scripting.
+OpenAI-compatible gateway for Claude Max. Nothing you couldn't build yourself
+in a weekend, except we spent about twenty commits tracking down one specific
+server behaviour so you don't have to.
 
-## What This Repo Contains
+Three things it does, in this order of importance:
 
-- `src/`: Bun backend API gateway (`/v1/chat/completions`, `/v1/models`, `/health`, `/api/telemetry/*`)
-- `src/ui/`: Audit dashboard — Vite + React 19 + TanStack Router + TanStack Query + Tailwind v4 + shadcn/ui (nova preset)
-- `logs/`: runtime log files and `telemetry.db` SQLite store
-- `__tests__/`: backend integration tests
+1. Speaks the OpenAI dialect, so your existing tools just work.
+2. Logs every byte of every call — client body, transformed upstream body, raw
+   SSE stream, timings, tokens, reasoning. Everything. On disk.
+3. Ships a dashboard that treats an LLM call as a first-class object:
+   readable, searchable, replayable.
+
+## Disclaimer, being honest about it
+
+This gateway authenticates with Anthropic using your Claude Code OAuth
+credentials. Anthropic's Terms of Service state those tokens are for official
+clients. This project is not an official client — it is a community
+workaround, and a pragmatic one.
+
+Anthropic can break it tomorrow by changing the OAuth flow or the billing
+signature contract. We have already seen them tighten screws around thinking
+redaction mid-2026. If one day the gateway stops working, it is not you, it
+is the moving ground.
+
+Use at your own discretion. Do not put this behind a product you charge money
+for.
+
+## Features
+
+- **OpenAI-compatible API** at `/v1/chat/completions`, `/v1/models`,
+  `/v1/tokens/count`. Point an existing OpenAI client at it, it works.
+- **Full-fidelity audit** of every call. Not "enough for debugging" — every
+  byte, every event, every timing, on disk, queryable with any SQLite client.
+- **Integrated dashboard** at `/`. Requests list, full transcript, sessions,
+  live event stream, metrics, side-by-side compare, replay, export.
+- **Plaintext reasoning** instead of ciphertext. If that sentence sounds
+  unnecessary, read the *About that plaintext reasoning* section below and it
+  will stop sounding unnecessary.
 
 ## Requirements
 
-- Bun (recommended latest stable)
-- Claude Code authenticated locally (`~/.claude/.credentials.json`)
+- Bun, latest stable.
+- An authenticated Claude Code install. Credentials are read from
+  `~/.claude/.credentials.json` (override with `CREDENTIALS_PATH`).
 
-## Quick Start
-
-### 1) Install deps
+## Run it
 
 ```bash
 bun install
+bun run src/index.ts          # port 3456
+bun run src/index.ts 3457     # override
 ```
 
-### 2) Start the gateway
+The backend serves the prebuilt dashboard from `src/ui/dist/`. If no build
+exists, `GET /` returns a 503 telling you to build — see below.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | liveness |
+| `GET /v1/models` | upstream catalog with derived effort variants |
+| `POST /v1/chat/completions` | streaming and non-streaming chat |
+| `POST /v1/tokens/count` | token count for a message set |
+| `GET /api/account/profile` | cached OAuth profile |
+| `GET /api/telemetry/requests` | recorded requests, filterable |
+| `GET /api/telemetry/requests/:traceId` | single request with body and SSE events |
+| `GET /api/telemetry/logs` | raw event log |
+| `GET /api/telemetry/stream` | SSE live feed of new events |
+| `GET /api/telemetry/metrics` | aggregated metrics for a window |
+| `GET /api/telemetry/export` | CSV or JSON export |
 
 ```bash
-bun run src/index.ts
+curl -s "http://127.0.0.1:3456/api/telemetry/requests?limit=5" \
+  | jq '.requests[] | {traceId, model, duration, inputTokens, outputTokens}'
 ```
 
-Default port is `3456`. Pass an alternate port as the first arg: `bun run src/index.ts 3457`.
+The SQLite store at `logs/telemetry.db` is also directly queryable. No
+abstraction to learn, no ORM to fight.
 
-## API Endpoints
+## Dashboard
 
-Core:
+All routes are URL-driven and shareable.
 
-- `GET /health`
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-- `POST /v1/tokens/count`
-- `GET /api/account/profile`
+| Route | Contents |
+| --- | --- |
+| `/` | requests list with filters, keyboard nav, pagination |
+| `/sessions` | conversations grouped from consecutive turns |
+| `/s/:sessionId` | all turns of a conversation, sticky per-turn header |
+| `/r/:traceId` | full transcript, technical panel, span timeline, replay, export |
+| `/live` | SSE event stream, pausable, level and stream filters |
+| `/metrics` | requests, latency, errors, tokens — window toggle 1m / 5m / 1h / 24h |
+| `/compare?a=X&b=Y` | two transcripts side by side with scroll-sync |
 
-Audit (read-only HTTP surface over the observability store):
+Keyboard: `/` focuses search, `j` and `k` move row selection, `Enter` opens,
+`Esc` clears. A dashboard without keyboard nav is cosplay.
 
-- `GET /api/telemetry/logs` — event query (filters: level, stream, event, traceId, sessionId, search, from, to, limit, offset, order)
-- `GET /api/telemetry/stream` — SSE live stream
-- `GET /api/telemetry/metrics` — aggregated metrics for a time window
-- `GET /api/telemetry/requests` — request records (one row per HTTP request, with `upstreamRequestBody` for `/v1/chat/completions` calls)
-- `GET /api/telemetry/requests/:traceId` — single request plus its event timeline
-- `GET /api/telemetry/export` — download events or requests as CSV/JSON
+## Development
 
-Example:
+Two terminals from the repo root:
 
 ```bash
-# see the last 5 chat completions with upstream body
-curl -s "http://127.0.0.1:3456/api/telemetry/requests?limit=5" | jq '.requests[] | {traceId, model, duration, upstreamRequestBody}'
+# backend
+bun run src/index.ts 3457
+
+# UI
+cd src/ui
+bun install
+bun run dev                   # http://localhost:5173
 ```
 
-The SQLite store (`logs/telemetry.db`) is also directly queryable with any SQLite client.
+Vite proxies `/api`, `/v1`, and `/health` to `http://127.0.0.1:3457`. HMR is on.
+
+## Build
+
+```bash
+cd src/ui
+bun run build                 # tsr generate && tsc -b && vite build → src/ui/dist/
+```
+
+The backend picks up the bundle automatically on the next request. No separate
+deploy, no CORS dance, no nginx config.
+
+## Test and typecheck
+
+```bash
+bun test                      # full backend suite
+cd src/ui && bun run typecheck
+```
 
 ## Configuration
 
-- `PORT` (default: `3456`)
-- `CREDENTIALS_PATH` (default: `~/.claude/.credentials.json`)
-- `NODE_ENV` — not used for log routing; stdout is always included in the multistream so journalctl always sees live output.
+| Env | Default | Notes |
+| --- | --- | --- |
+| `PORT` | `3456` | first CLI arg overrides |
+| `CREDENTIALS_PATH` | `~/.claude/.credentials.json` | OAuth credentials source |
 
-## Testing
+## About that plaintext reasoning
 
-```bash
-bun test
-```
+Anthropic exposes two different contracts for thinking on the same endpoint,
+and the documentation does not make the distinction obvious. They are not
+interchangeable.
 
-Specific suites:
+Send `thinking: { type: "enabled", budget_tokens: N }` and the server assumes
+you intend to re-inject the ciphertext signature on the next turn. You get
+back an empty thinking block shell and a signed blob that is opaque to anyone
+without Anthropic's private keys. Private compute. Great for multi-turn agent
+frameworks that want opacity. Useless for an audit pipeline where you want to
+actually read what the model was thinking.
 
-```bash
-bun test __tests__/observability.spec.ts
-bun test __tests__/transform-thinking-passthrough.spec.ts
-```
+Send `thinking: { type: "adaptive", display: "summarized" }` together with
+`output_config: { effort }` and the server emits `thinking_delta` events
+containing the model's reasoning in plaintext. It is summarized — not the raw
+internal monologue — but it is readable, and it matches what the official
+Claude Code CLI and the OpenCode anthropic plugin emit on the wire.
 
-## Audit Dashboard
+This gateway picks the second form. That is the entire unlock. Dozens of
+commits of investigation, one field difference, one lesson learned: when you
+claim byte-for-byte parity with another client, verify it with a real wire
+capture. Reading their source is not the same thing.
 
-The dashboard is a static SPA bundled into `src/ui/dist/` and served by the backend alongside the API (same process, same port). In production, hitting `GET /` on the gateway serves the compiled dashboard; in development you run the Vite dev server with a proxy to the backend.
+## Architecture
 
-### Routes
+Backend (`src/`) is a Bun native HTTP server. Stateless apart from the SQLite
+event store and an in-memory credential cache. Routes under `src/http/`,
+OpenAI ↔ Anthropic translation under `src/transform/`, upstream client under
+`src/upstream/`, observability under `src/observability/`.
 
-- `/` — Requests list (filters: model, status, free-text search; URL-driven)
-- `/sessions` — Conversations grouped from consecutive turns
-- `/s/:sessionId` — All turns of a conversation, sticky-header per turn
-- `/r/:traceId` — Full transcript (system blocks, messages, tools, reasoning) + technical side panel + span timeline + Replay + Export (JSON / Markdown)
-- `/live` — Real-time SSE stream of telemetry events, pausable, level/stream filters
-- `/metrics` — Aggregated metrics with window toggle (1m / 5m / 1h / 24h) + charts
-- `/compare?a=<traceA>&b=<traceB>` — Side-by-side transcripts with scroll-sync
+Frontend (`src/ui/`) is Vite + React 19 + TanStack Router (file-based) +
+TanStack Query + Tailwind v4 + shadcn/ui. Builds to a static SPA served by the
+backend on the same port.
 
-### Keyboard shortcuts (global)
+## What this is not
 
-- `/` — focus search input on the current route
-- `j` / `k` — move list selection down / up (on the Requests list)
-- `Enter` — open the selected row
-- `Esc` — clear selection / blur focused input
+Not production-ready in the enterprise sense. Not audited for security. Not
+supported by Anthropic. Not multi-tenant — it reads credentials from disk and
+uses them. Not a replacement for a real API key if your workload needs SLA.
 
-### Dev loop
+It is a tool for people who want to see, in full colour, what their LLM is
+doing on a Claude Max subscription, today.
 
-From the repo root, run the gateway and the Vite dev server in two terminals:
+## Further reading
 
-```bash
-# terminal 1 — backend gateway (default port 3456, but we prefer 3457 for dev)
-bun run src/index.ts 3457
-
-# terminal 2 — UI dev server (Vite @ http://localhost:5173 with /api, /v1, /health proxied to 3457)
-cd src/ui
-bun install   # first time only
-bun run dev
-```
-
-Open http://localhost:5173 in your browser. HMR is on. Every `/api/*`, `/v1/*`, `/health` request is proxied to `http://127.0.0.1:3457`.
-
-### Build for production
-
-The backend only serves `src/ui/dist/` if it exists on disk; build it once, then the gateway picks it up automatically on next request:
-
-```bash
-cd src/ui
-bun run build     # runs `tsr generate && tsc -b && vite build` → writes src/ui/dist/
-```
-
-Then start the gateway as usual; `GET http://localhost:3456/` will now return the compiled SPA, and unknown GET paths fall through to `/index.html` for client-side routing.
-
-### Typecheck
-
-```bash
-cd src/ui
-bun run typecheck   # runs `tsr generate && tsc --noEmit`
-```
-
-## Docs
-
-- Observability internals: `OBSERVABILITY.md`
+- `OBSERVABILITY.md` — event model, SQLite schema, API surface, retention
+- `CLAUDE.md` — agent conventions for this codebase
