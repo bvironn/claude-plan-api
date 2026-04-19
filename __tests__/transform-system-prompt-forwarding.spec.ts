@@ -23,7 +23,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     });
 
     const msg = (body.messages as Array<Record<string, unknown>>)[0]!;
-    // After addCacheControlToLastUserText the string content is wrapped into
+    // After addCacheControlToLastUserBlock the string content is wrapped into
     // an array with a single text block. Extract the text from whichever
     // shape is present.
     let text: string;
@@ -70,7 +70,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     });
 
     const msg = (body.messages as Array<Record<string, unknown>>)[0]!;
-    // Content is an array after addCacheControlToLastUserText; verify the
+    // Content is an array after addCacheControlToLastUserBlock; verify the
     // single text block is exactly "hi" with no preamble.
     const blocks = msg.content as Block[];
     expect(blocks).toHaveLength(1);
@@ -108,7 +108,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     });
 
     const msg = (body.messages as Array<Record<string, unknown>>)[0]!;
-    // addCacheControlToLastUserText wraps strings into array form. Before
+    // addCacheControlToLastUserBlock wraps strings into array form. Before
     // that wrapping our injection ran on a string; verify the resulting
     // text equals the expected concatenation.
     const blocks = msg.content as Block[];
@@ -203,7 +203,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(messages[2]!.role).toBe("user");
 
     // First user content may be a string (only the LAST user message gets
-    // wrapped into an array by addCacheControlToLastUserText).
+    // wrapped into an array by addCacheControlToLastUserBlock).
     const firstContent = messages[0]!.content;
     let firstText: string;
     if (typeof firstContent === "string") {
@@ -216,7 +216,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(firstText).toBe(`${CONTEXT_PREAMBLE}A\n\nfirst`);
 
     // Second user turn must be untouched — plain string "second", no prefix.
-    // Note: addCacheControlToLastUserText converts the LAST user text to an
+    // Note: addCacheControlToLastUserBlock converts the LAST user text to an
     // array-with-cache-control. So messages[2].content is an array with one
     // text block whose text === "second".
     const secondContent = messages[2]!.content;

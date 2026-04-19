@@ -138,7 +138,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     },
   ];
 
-  addCacheControlToLastUserText(messages);
+  addCacheControlToLastUserBlock(messages);
 
   const repaired = repairToolPairs(messages);
 
@@ -265,6 +265,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
         input_schema: fn.parameters || { type: "object", properties: {} },
       };
     });
+    addCacheControlToLastTool(result.tools as Array<Record<string, unknown>>);
     // Mirror the reference plugin: when tools are declared, default
     // `tool_choice` to `{type: "auto"}` unless the caller supplied
     // one explicitly. The plugin always sends this and the server
@@ -286,7 +287,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   return { body: result, isStructuredOutput };
 }
 
-function addCacheControlToLastUserText(messages: AnthropicMessage[]): void {
+function addCacheControlToLastUserBlock(messages: AnthropicMessage[]): void {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (!msg) continue;
@@ -300,16 +301,19 @@ function addCacheControlToLastUserText(messages: AnthropicMessage[]): void {
     }
     if (Array.isArray(msg.content)) {
       const arr = msg.content as Array<Record<string, unknown>>;
-      for (let j = arr.length - 1; j >= 0; j--) {
-        const item = arr[j];
-        if (!item) continue;
-        if (item.type === "text") {
-          item.cache_control = { type: "ephemeral", ttl: "1h" };
-          return;
-        }
+      const last = arr[arr.length - 1];
+      if (last) {
+        last.cache_control = { type: "ephemeral", ttl: "1h" };
       }
     }
     return;
+  }
+}
+
+function addCacheControlToLastTool(tools: Array<Record<string, unknown>>): void {
+  const last = tools[tools.length - 1];
+  if (last) {
+    last.cache_control = { type: "ephemeral", ttl: "1h" };
   }
 }
 
