@@ -88,14 +88,27 @@ export function mapToolName(name: string): string {
 
   const canonical = ccCanonical(name);
   const base = canonical ?? sanitizeToolName(name);
-  // Apply mcp_ prefix (Claude Code convention). Skip if the name already
-  // carries it (idempotent — defensive against clients that pre-prefix).
-  const prefixed = base.startsWith(MCP_PREFIX) ? base : `${MCP_PREFIX}${base}`;
+  // CRITICAL: Anthropic's OAuth-billing validation rejects tool names whose
+  // first character (after `mcp_` prefix) is lowercase, returning a misleading
+  // HTTP 400 with body `{"error": {"message": "You're out of extra usage..."}}`.
+  // The error has NOTHING to do with billing — it is a request-shape rejection.
+  // We unconditionally uppercase the first char here to mirror the reference
+  // plugin (griffinmartin/opencode-claude-auth) which is empirically known to
+  // pass validation. See: src/domain/tool-mapping.ts (this file) commit history.
+  const naked = base.startsWith(MCP_PREFIX) ? base.slice(MCP_PREFIX.length) : base;
+  const cased = naked.length > 0 ? naked[0]!.toUpperCase() + naked.slice(1) : naked;
+  const prefixed = `${MCP_PREFIX}${cased}`;
 
+  // Idempotence guard: if `prefixed` is already a known wire name in the
+  // reverse map, the caller is re-feeding a previously-produced output rather
+  // than introducing a new collision. Skip dedup so `mapToolName(mapToolName(x))`
+  // remains stable — required by the casing spec.
   const used = new Set(Object.values(toolMap));
   let mapped = prefixed;
-  let suffix = 2;
-  while (used.has(mapped)) mapped = `${prefixed}_${suffix++}`;
+  if (!toolMapReverse[prefixed]) {
+    let suffix = 2;
+    while (used.has(mapped)) mapped = `${prefixed}_${suffix++}`;
+  }
 
   toolMap[name] = mapped;
   toolMapReverse[mapped] = name;
