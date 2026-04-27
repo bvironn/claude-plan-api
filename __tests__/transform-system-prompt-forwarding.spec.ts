@@ -137,7 +137,10 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(blocks).toHaveLength(2);
     expect(blocks[0]!.type).toBe("text");
     expect(blocks[0]!.text).toBe(`${CONTEXT_PREAMBLE}A\n\nhi`);
-    expect(blocks[1]!.type).toBe("image_url");
+    // vision conversion runs BEFORE cache_control inspection, so the second
+    // block has already been translated from `image_url` → Anthropic-native
+    // `image` shape by the time this assertion runs.
+    expect(blocks[1]!.type).toBe("image");
   });
 
   // --- REQ-7: Handle array content without text block ---
@@ -160,7 +163,10 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(blocks).toHaveLength(2);
     expect(blocks[0]!.type).toBe("text");
     expect(blocks[0]!.text).toBe(`${CONTEXT_PREAMBLE}A\n\n`);
-    expect(blocks[1]!.type).toBe("image_url");
+    // vision conversion runs BEFORE cache_control inspection, so the second
+    // block has already been translated from `image_url` → Anthropic-native
+    // `image` shape by the time this assertion runs.
+    expect(blocks[1]!.type).toBe("image");
   });
 
   // --- REQ-8: Drop client system when no user message exists ---

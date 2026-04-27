@@ -13,6 +13,92 @@ import { repairToolPairs } from "./repair-tool-pairs.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
+// =============================================================================
+// Vision block translation (OpenAI / Responses API → Anthropic-native)
+// =============================================================================
+//
+// Anthropic accepts ONLY its native `image` block shape with a typed `source`
+// (either `{type:"base64", media_type, data}` or `{type:"url", url}`).
+// OpenAI clients send `{type:"image_url", image_url:{url}|"<url>"}`; the
+// Responses API uses `{type:"input_image", image_url:...}`. Without
+// translation Anthropic returns HTTP 400 on the literal `image_url` tag,
+// and tool messages with array content silently lose their images via
+// `JSON.stringify`. The helpers below translate both forms in a single
+// pure pass; malformed or unsafe blocks are dropped with a `warn` event.
+
+/**
+ * Pull the URL out of an OpenAI / Responses-API image block. Handles both
+ * the object form (`image_url: { url }`) and the legacy string form
+ * (`image_url: "..."`). Returns null if no usable URL exists — caller
+ * decides whether to drop the block.
+ */
+function extractImageUrl(block: Record<string, unknown>): string | null {
+  const iu = block.image_url;
+  if (typeof iu === "string") return iu;
+  if (iu && typeof iu === "object") {
+    const url = (iu as Record<string, unknown>).url;
+    if (typeof url === "string") return url;
+  }
+  return null;
+}
+
+/**
+ * Convert an extracted URL to an Anthropic `source` object. `data:` URIs
+ * become `base64` sources (media_type parsed from the MIME segment);
+ * `http(s)://` URLs become `url` sources. Any other scheme returns null
+ * — the caller drops the block to avoid forwarding `file://` or other
+ * potentially unsafe URIs to the upstream.
+ */
+function imageUrlToAnthropicSource(url: string): Record<string, unknown> | null {
+  const m = url.match(/^data:([^;,]+);base64,(.*)$/);
+  if (m) return { type: "base64", media_type: m[1], data: m[2] };
+  if (/^https?:\/\//i.test(url)) return { type: "url", url };
+  return null;
+}
+
+/**
+ * Convert an OpenAI / Responses-API content array into Anthropic's native
+ * shape. Recognized inputs:
+ *   - {type: "image_url", image_url: {url} | "<url>"}      → image base64|url
+ *   - {type: "input_image", image_url: ...}                → identical to above
+ *   - {type: "image", source: ...} (already native)        → pass-through
+ *   - {type: "text", text}                                  → pass-through
+ *   - any other block shape (tool_use, tool_result, ...)   → pass-through
+ *
+ * Malformed / unsafe blocks are dropped with a `transform.image_block_dropped`
+ * warn event; the helper NEVER throws. Anthropic accepts both string and
+ * array shapes for `tool_result.content`, so this helper is safe to call
+ * on any array source.
+ */
+export function toAnthropicContentBlocks(
+  content: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const block of content) {
+    const t = block.type;
+    if (t === "image_url" || t === "input_image") {
+      const url = extractImageUrl(block);
+      if (!url) {
+        emit("warn", "transform.image_block_dropped", { reason: "no_url", urlPrefix: "" });
+        continue;
+      }
+      const source = imageUrlToAnthropicSource(url);
+      if (!source) {
+        emit("warn", "transform.image_block_dropped", {
+          reason: "unsupported_scheme",
+          urlPrefix: url.slice(0, 60),
+        });
+        continue;
+      }
+      out.push({ type: "image", source });
+      continue;
+    }
+    // text, image (already native), or any other block type — pass through.
+    out.push(block);
+  }
+  return out;
+}
+
 // (Removed EFFORT_TO_BUDGET — we no longer emit `thinking: { type: "enabled",
 // budget_tokens: N }`. See the thinking-mode block further down in
 // `openaiToAnthropic` for the rationale: `enabled + budget` triggers the
@@ -78,7 +164,16 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
       const result = {
         type: "tool_result",
         tool_use_id: msg.tool_call_id,
-        content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+        // Array content (e.g. a tool returning [text, image]) is translated
+        // through the vision helper so images survive as Anthropic-native
+        // `image` blocks. String content keeps the legacy passthrough; any
+        // other shape (object, etc.) falls back to JSON.stringify so we
+        // never silently drop data.
+        content: Array.isArray(msg.content)
+          ? toAnthropicContentBlocks(msg.content as Array<Record<string, unknown>>)
+          : typeof msg.content === "string"
+            ? msg.content
+            : JSON.stringify(msg.content),
       };
       if (last?.role === "user" && (last as unknown as Record<string, unknown>)._batch) {
         (last.content as Array<Record<string, unknown>>).push(result);
@@ -87,7 +182,14 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
         messages.push(entry);
       }
     } else {
-      messages.push({ role: msg.role as string, content: msg.content as string });
+      // User (and any other non-system/non-assistant-tool/non-tool) messages.
+      // Array content carries OpenAI vision blocks that must be translated to
+      // Anthropic-native shapes BEFORE downstream passes (system-prompt
+      // forwarding, cache_control) inspect the array.
+      const content = Array.isArray(msg.content)
+        ? toAnthropicContentBlocks(msg.content as Array<Record<string, unknown>>)
+        : (msg.content as string);
+      messages.push({ role: msg.role as string, content } as AnthropicMessage);
     }
   }
   for (const msg of messages) delete (msg as unknown as Record<string, unknown>)._batch;
