@@ -53,9 +53,9 @@ beforeAll(async () => {
   // Block real upstream calls: refreshRegistry calls fetchUpstreamModels
   // which needs credentials. Force it to throw so the route falls back to
   // the seeded registry.
-  fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
     throw new Error("fetch blocked in test");
-  });
+  }) as unknown as typeof fetch);
 
   const credModule = await import("../src/domain/credentials.ts");
   spyOn(credModule, "ensureValidToken").mockRejectedValue(new Error("no creds"));

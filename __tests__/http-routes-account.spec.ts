@@ -39,12 +39,12 @@ beforeEach(async () => {
   // Reset the account module's cache by re-importing… but ES modules are
   // cached across tests. Instead we rely on refresh=1 to force a fetch,
   // and we use fresh mock responses per test.
-  fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () => {
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
     return new Response(JSON.stringify(UPSTREAM_PROFILE), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
-  });
+  }) as unknown as typeof fetch);
 });
 
 afterEach(() => {

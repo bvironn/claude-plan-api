@@ -14,9 +14,9 @@ beforeEach(async () => {
   } as ReturnType<typeof credModule.getCredentials>);
   ensureValidTokenSpy = spyOn(credModule, "ensureValidToken").mockResolvedValue(undefined);
 
-  fetchSpy = spyOn(globalThis, "fetch").mockImplementation(async () =>
-    new Response(JSON.stringify({ input_tokens: 11 }), { status: 200 }),
-  );
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+    new Response(JSON.stringify({ input_tokens: 11 }), { status: 200 })
+  ) as unknown as typeof fetch);
 });
 
 afterEach(() => {

@@ -96,7 +96,7 @@ let registry: UpstreamModel[] | null = null;
 
 // De-duplicates concurrent fetches so a burst of requests results in one
 // upstream call, not N.
-let inflight: Promise<UpstreamModel[]> | null = null;
+let inflight: Promise<readonly UpstreamModel[]> | null = null;
 
 function currentCatalog(): readonly UpstreamModel[] {
   return registry ?? FALLBACK_MODELS;
