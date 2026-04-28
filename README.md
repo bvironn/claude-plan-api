@@ -1,15 +1,41 @@
+<div align="center">
+
+```
+   ┌─ openai dialect ─┐         ┌─ anthropic ─┐
+   │                  │ ──────▶ │              │
+   │   /v1/chat/...   │ ◀────── │  /messages   │
+   └──────────────────┘         └──────────────┘
+              │                        │
+              └──── full audit ────────┘
+                       on disk
+```
+
 # claude-plan-api
 
-OpenAI-compatible gateway for Claude Max. Nothing you couldn't build yourself
-in a weekend, except we spent about twenty commits tracking down one specific
-server behaviour so you don't have to.
+**OpenAI-compatible gateway for Claude Max.**
+*Speaks the dialect. Logs every byte. Ships the dashboard.*
+
+[Run it](#run-it) · [API](#api) · [Dashboard](#dashboard) · [Plaintext reasoning](#about-that-plaintext-reasoning) · [Architecture](#architecture) · [Disclaimer](#disclaimer-being-honest-about-it)
+
+![Bun](https://img.shields.io/badge/Bun-latest-fbf0df?logo=bun&logoColor=000)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=fff)
+![Tests](https://img.shields.io/badge/tests-195%20passing-3fb950)
+![License](https://img.shields.io/badge/license-MIT-1f1d1a)
+
+</div>
+
+---
+
+Nothing you couldn't build yourself in a weekend, except we spent about
+twenty commits tracking down one specific server behaviour so you don't have
+to.
 
 Three things it does, in this order of importance:
 
-1. Speaks the OpenAI dialect, so your existing tools just work.
-2. Logs every byte of every call — client body, transformed upstream body, raw
-   SSE stream, timings, tokens, reasoning. Everything. On disk.
-3. Ships a dashboard that treats an LLM call as a first-class object:
+1. **Speaks the OpenAI dialect**, so your existing tools just work.
+2. **Logs every byte of every call** — client body, transformed upstream
+   body, raw SSE stream, timings, tokens, reasoning. Everything. On disk.
+3. **Ships a dashboard** that treats an LLM call as a first-class object:
    readable, searchable, replayable.
 
 ## Disclaimer, being honest about it
@@ -27,23 +53,14 @@ is the moving ground.
 Use at your own discretion. Do not put this behind a product you charge money
 for.
 
-## Features
-
-- **OpenAI-compatible API** at `/v1/chat/completions`, `/v1/models`,
-  `/v1/tokens/count`. Point an existing OpenAI client at it, it works.
-- **Full-fidelity audit** of every call. Not "enough for debugging" — every
-  byte, every event, every timing, on disk, queryable with any SQLite client.
-- **Integrated dashboard** at `/`. Requests list, full transcript, sessions,
-  live event stream, metrics, side-by-side compare, replay, export.
-- **Plaintext reasoning** instead of ciphertext. If that sentence sounds
-  unnecessary, read the *About that plaintext reasoning* section below and it
-  will stop sounding unnecessary.
-
 ## Requirements
 
-- Bun, latest stable.
-- An authenticated Claude Code install. Credentials are read from
-  `~/.claude/.credentials.json` (override with `CREDENTIALS_PATH`).
+| | |
+| --- | --- |
+| Runtime | Bun, latest stable |
+| Credentials | Authenticated Claude Code install (`~/.claude/.credentials.json`, override with `CREDENTIALS_PATH`) |
+| Disk | A few hundred MB if you log heavily; SQLite WAL grows with traffic |
+| Network | Outbound HTTPS to `api.anthropic.com` |
 
 ## Run it
 
@@ -54,23 +71,26 @@ bun run src/index.ts 3457     # override
 ```
 
 The backend serves the prebuilt dashboard from `src/ui/dist/`. If no build
-exists, `GET /` returns a 503 telling you to build — see below.
+exists, `GET /` returns a 503 telling you to build — see [Build](#build).
 
 ## API
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health` | liveness |
-| `GET /v1/models` | upstream catalog with derived effort variants |
-| `POST /v1/chat/completions` | streaming and non-streaming chat |
-| `POST /v1/tokens/count` | token count for a message set |
-| `GET /api/account/profile` | cached OAuth profile |
-| `GET /api/telemetry/requests` | recorded requests, filterable |
-| `GET /api/telemetry/requests/:traceId` | single request with body and SSE events |
-| `GET /api/telemetry/logs` | raw event log |
-| `GET /api/telemetry/stream` | SSE live feed of new events |
-| `GET /api/telemetry/metrics` | aggregated metrics for a window |
-| `GET /api/telemetry/export` | CSV or JSON export |
+OpenAI-compatible surface, plus a telemetry surface that exposes the audit
+log over HTTP. Point any existing OpenAI client at the base URL and it works.
+
+| Endpoint | Scope | Purpose |
+| --- | --- | --- |
+| `GET /health` | platform | liveness |
+| `GET /v1/models` | OpenAI-compat | upstream catalog with derived effort variants |
+| `POST /v1/chat/completions` | OpenAI-compat | streaming and non-streaming chat |
+| `POST /v1/tokens/count` | OpenAI-compat | token count for a message set |
+| `GET /api/account/profile` | gateway | cached OAuth profile |
+| `GET /api/telemetry/requests` | telemetry | recorded requests, filterable |
+| `GET /api/telemetry/requests/:traceId` | telemetry | single request with body and SSE events |
+| `GET /api/telemetry/logs` | telemetry | raw event log |
+| `GET /api/telemetry/stream` | telemetry | SSE live feed of new events |
+| `GET /api/telemetry/metrics` | telemetry | aggregated metrics for a window |
+| `GET /api/telemetry/export` | telemetry | CSV or JSON export |
 
 ```bash
 curl -s "http://127.0.0.1:3456/api/telemetry/requests?limit=5" \
@@ -82,7 +102,8 @@ abstraction to learn, no ORM to fight.
 
 ## Dashboard
 
-All routes are URL-driven and shareable.
+All routes are URL-driven and shareable. A dashboard without keyboard nav is
+cosplay, so this one has it.
 
 | Route | Contents |
 | --- | --- |
@@ -94,8 +115,49 @@ All routes are URL-driven and shareable.
 | `/metrics` | requests, latency, errors, tokens — window toggle 1m / 5m / 1h / 24h |
 | `/compare?a=X&b=Y` | two transcripts side by side with scroll-sync |
 
-Keyboard: `/` focuses search, `j` and `k` move row selection, `Enter` opens,
-`Esc` clears. A dashboard without keyboard nav is cosplay.
+| Key | Action |
+| --- | --- |
+| `/` | focus search |
+| `j` `k` | move row selection |
+| `Enter` | open selected |
+| `Esc` | clear / back |
+
+## Architecture
+
+```
+   client                  gateway                     upstream
+  ────────                ──────────                  ───────────
+                        ┌──────────┐
+   OpenAI ───POST───▶   │transform │   ──POST──▶     Anthropic
+   client    /v1        │ openai → │     /v1            API
+                        │ anthropic│
+                        └─────┬────┘
+                              │ every request,
+                              │ every byte,
+                              │ every SSE event
+                              ▼
+                       ┌──────────┐
+                       │  SQLite  │  ─read─▶  Dashboard
+                       │ telemetry│           Vite SPA
+                       │   .db    │           Live · Replay · Compare · Export
+                       └──────────┘
+```
+
+Backend (`src/`) is a Bun native HTTP server. Stateless apart from the SQLite
+event store and an in-memory credential cache.
+
+| Path | Concern |
+| --- | --- |
+| `src/http/` | routing, static, middleware |
+| `src/transform/` | OpenAI ↔ Anthropic translation (request and response) |
+| `src/upstream/` | Anthropic client, headers, billing, count-tokens |
+| `src/observability/` | event bus, SQLite store, tracer, logger |
+| `src/domain/` | account, credentials, models, tool-mapping |
+| `src/ui/` | Vite + React 19 SPA — separate sub-project |
+
+Frontend is Vite + React 19 + TanStack Router (file-based) + TanStack Query +
+Tailwind v4 + shadcn/ui. Builds to a static SPA served by the backend on the
+same port. No CORS dance, no separate deploy, no nginx config.
 
 ## Development
 
@@ -120,22 +182,25 @@ cd src/ui
 bun run build                 # tsr generate && tsc -b && vite build → src/ui/dist/
 ```
 
-The backend picks up the bundle automatically on the next request. No separate
-deploy, no CORS dance, no nginx config.
+The backend picks up the bundle automatically on the next request.
 
 ## Test and typecheck
 
 ```bash
-bun test                      # full backend suite
+bun test                      # full backend suite — 195 tests
+bunx tsc --noEmit             # backend typecheck — 0 errors
 cd src/ui && bun run typecheck
 ```
+
+The repo follows Strict TDD for behavioural changes (see `CLAUDE.md`). `bun
+test` is the merge gate.
 
 ## Configuration
 
 | Env | Default | Notes |
 | --- | --- | --- |
 | `PORT` | `3456` | first CLI arg overrides |
-| `BIND_HOST` | `127.0.0.1` | address to bind. Defaults to loopback so the proxy is not exposed by accident. Set to `0.0.0.0` (or a specific IP) only if you knowingly want to expose the service — remember this gateway authenticates to Anthropic with **your** OAuth token |
+| `BIND_HOST` | `127.0.0.1` | Defaults to loopback so the proxy is not exposed by accident. Set to `0.0.0.0` (or a specific IP) only if you knowingly want to expose the service — remember this gateway authenticates to Anthropic with **your** OAuth token. |
 | `CREDENTIALS_PATH` | `~/.claude/.credentials.json` | OAuth credentials source |
 
 ## About that plaintext reasoning
@@ -162,17 +227,6 @@ commits of investigation, one field difference, one lesson learned: when you
 claim byte-for-byte parity with another client, verify it with a real wire
 capture. Reading their source is not the same thing.
 
-## Architecture
-
-Backend (`src/`) is a Bun native HTTP server. Stateless apart from the SQLite
-event store and an in-memory credential cache. Routes under `src/http/`,
-OpenAI ↔ Anthropic translation under `src/transform/`, upstream client under
-`src/upstream/`, observability under `src/observability/`.
-
-Frontend (`src/ui/`) is Vite + React 19 + TanStack Router (file-based) +
-TanStack Query + Tailwind v4 + shadcn/ui. Builds to a static SPA served by the
-backend on the same port.
-
 ## What this is not
 
 Not production-ready in the enterprise sense. Not audited for security. Not
@@ -184,5 +238,16 @@ doing on a Claude Max subscription, today.
 
 ## Further reading
 
-- `OBSERVABILITY.md` — event model, SQLite schema, API surface, retention
-- `CLAUDE.md` — agent conventions for this codebase
+| File | Contents |
+| --- | --- |
+| [`OBSERVABILITY.md`](./OBSERVABILITY.md) | event model, SQLite schema, API surface, retention |
+| [`CLAUDE.md`](./CLAUDE.md) | agent conventions for this codebase (Bun-first rules) |
+| [`LICENSE`](./LICENSE) | MIT |
+
+---
+
+<div align="center">
+
+Built with **Bun** · **TypeScript** · **React 19** · **TanStack** · **shadcn/ui** · **SQLite**
+
+</div>
