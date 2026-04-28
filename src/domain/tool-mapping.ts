@@ -85,6 +85,7 @@ const MCP_PREFIX = "mcp_";
 
 export function mapToolName(name: string): string {
   if (toolMap[name]) return toolMap[name];
+  if (toolMapReverse[name]) return name;
 
   const canonical = ccCanonical(name);
   const base = canonical ?? sanitizeToolName(name);
@@ -99,16 +100,10 @@ export function mapToolName(name: string): string {
   const cased = naked.length > 0 ? naked[0]!.toUpperCase() + naked.slice(1) : naked;
   const prefixed = `${MCP_PREFIX}${cased}`;
 
-  // Idempotence guard: if `prefixed` is already a known wire name in the
-  // reverse map, the caller is re-feeding a previously-produced output rather
-  // than introducing a new collision. Skip dedup so `mapToolName(mapToolName(x))`
-  // remains stable — required by the casing spec.
   const used = new Set(Object.values(toolMap));
   let mapped = prefixed;
-  if (!toolMapReverse[prefixed]) {
-    let suffix = 2;
-    while (used.has(mapped)) mapped = `${prefixed}_${suffix++}`;
-  }
+  let suffix = 2;
+  while (used.has(mapped)) mapped = `${prefixed}_${suffix++}`;
 
   toolMap[name] = mapped;
   toolMapReverse[mapped] = name;

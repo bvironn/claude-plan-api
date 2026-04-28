@@ -87,10 +87,11 @@ describe("mapToolName — idempotence", () => {
       "mcp_engram__mem_save",
     ];
     for (const x of inputs) {
-      // Each input gets a fresh map so the dedup loop doesn't disambiguate
-      // collisions across the property check (e.g. "bash" and "mcp_Bash" both
-      // canonicalize to "mcp_Bash" — without a reset the second would become
-      // "mcp_Bash_2" and break the property).
+      // Each input gets a fresh map so that DISTINCT FRESH inputs that canonicalize
+      // to the same wire name (e.g. `bash` and `Bash` both → `mcp_Bash`) don't get
+      // disambiguated by the dedup loop across the property check. Already-mapped
+      // re-feeds short-circuit unconditionally via the `toolMapReverse[name]`
+      // early-return at the top of `mapToolName`, independent of this reset.
       resetDynamicMap();
       const once = mapToolName(x);
       const twice = mapToolName(once);
@@ -104,5 +105,36 @@ describe("unmapToolName — round-trip", () => {
     const wire = mapToolName("engram__mem_save");
     expect(wire).toBe("mcp_Engram__mem_save");
     expect(unmapToolName(wire)).toBe("engram__mem_save");
+  });
+});
+
+describe("mapToolName — wire-name re-feed", () => {
+  test("returns input unchanged AND preserves reverse-map", () => {
+    // Seed the map with an original input
+    expect(mapToolName("engram__mem_save")).toBe("mcp_Engram__mem_save");
+    // Re-feeding the wire name must return it unchanged
+    expect(mapToolName("mcp_Engram__mem_save")).toBe("mcp_Engram__mem_save");
+    // The reverse map must NOT have been clobbered — unmapToolName must still
+    // return the ORIGINAL input, not the wire name
+    expect(unmapToolName("mcp_Engram__mem_save")).toBe("engram__mem_save");
+  });
+});
+
+describe("unmapToolName — fallback", () => {
+  test("returns input when wire name is not in reverse-map", () => {
+    // Cold-cache miss: no prior mapToolName call, resetDynamicMap already ran in beforeEach
+    expect(unmapToolName("mcp_Engram__mem_save")).toBe("engram__mem_save");
+  });
+});
+
+describe("mapToolName — paranoia", () => {
+  test("re-feeding dedup-suffixed wire name short-circuits without re-dedup", () => {
+    // Set up a dedup collision: "bash" and "Bash" both canonicalize to "mcp_Bash"
+    expect(mapToolName("bash")).toBe("mcp_Bash");
+    expect(mapToolName("Bash")).toBe("mcp_Bash_2");
+    // Re-feeding the suffixed wire name must short-circuit (no mcp_Bash_3)
+    expect(mapToolName("mcp_Bash_2")).toBe("mcp_Bash_2");
+    // Reverse map must still point to original "Bash", not the re-fed wire name
+    expect(unmapToolName("mcp_Bash_2")).toBe("Bash");
   });
 });
