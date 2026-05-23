@@ -90,20 +90,29 @@ export function buildBetas(
   parts.push("structured-outputs-2025-11-13");
   parts.push("fine-grained-tool-streaming-2025-05-14");
 
-  // Long-context beta `context-1m-2025-08-07` is a transitional opt-in
-  // header that opus-4-6 requires to access its 1M context window on
-  // OAuth accounts. We attach it by default for opus-4-6 because the
-  // retry loop in `anthropic-client.ts` relies on `addExcludedBeta` to
-  // DROP it when upstream rejects a long-context request (the defensive
-  // fallback to 200k); removing it from default would invalidate that
-  // path and its tests.
+  // Long-context beta `context-1m-2025-08-07`.
   //
-  // opus-4-7 and the 4-6 generation Sonnets DO NOT need this beta: they
-  // declare `max_input_tokens: 1_000_000` in the /v1/models catalog (see
-  // `models-client.ts`) and the 1M window is granted natively from the
-  // model id alone. Verified by hitting api.anthropic.com directly with
-  // the OAuth token. We intentionally avoid adding the beta for those
-  // models so the request fingerprint stays minimal.
+  // Anthropic /v1/models (verified live with the OAuth token) declares
+  // FIVE models with `max_input_tokens: 1_000_000`:
+  //   claude-opus-4-6                 (128k output)
+  //   claude-opus-4-7                 (128k output)
+  //   claude-sonnet-4-6               (128k output)
+  //   claude-sonnet-4-5-20250929      (64k output)
+  //   claude-sonnet-4-20250514        (64k output)
+  //
+  // Of those, only `claude-opus-4-6` empirically requires the beta to
+  // unlock its 1M window on OAuth accounts (pre-existing observation;
+  // see commit eb125a9 "auto-exclude long-context betas on 400 errors
+  // from Pro accounts" — opus-4-6 is the model that triggered the
+  // defensive retry path). The other four 1M models grant the full
+  // window natively from the model id alone, so we do NOT pre-attach
+  // the beta — the request fingerprint stays minimal AND the retry
+  // loop in `anthropic-client.ts` (which uses `addExcludedBeta` to drop
+  // betas on long-context rejections) still works for opus-4-6 as the
+  // graceful 200k fallback.
+  //
+  // The remaining catalog ids (haiku-4-5, opus-4-1, opus-4, opus-4-5)
+  // declare `max_input_tokens: 200_000` — there is nothing to opt into.
   if (model === "claude-opus-4-6") {
     const idx = parts.indexOf("oauth-2025-04-20");
     parts.splice(idx + 1, 0, "context-1m-2025-08-07");
