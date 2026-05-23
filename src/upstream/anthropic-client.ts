@@ -1,4 +1,4 @@
-import { ANTHROPIC_API, MAX_RETRIES } from "../config.ts";
+import { ANTHROPIC_API, MAX_RETRIES, MAX_RETRY_AFTER_MS } from "../config.ts";
 import { refreshToken } from "../domain/credentials.ts";
 import { buildHeaders } from "./headers.ts";
 import {
@@ -80,13 +80,27 @@ export async function callAnthropic(
 
       if ((res.status === 429 || res.status === 529) && attempt < MAX_RETRIES) {
         const wait = parseInt(res.headers.get("retry-after") || "") || 2 ** attempt;
+        const waitMs = wait * 1000;
+        // Quota-reset retries are hour-scale; surface the response immediately
+        // rather than blocking the proxy on a delay the caller can't observe.
+        // Mirrors opencode-claude-auth#211.
+        if (waitMs > MAX_RETRY_AFTER_MS) {
+          emit("warn", "upstream.retry.cap_exceeded", {
+            status: res.status,
+            attempt,
+            retryAfter: wait,
+            capMs: MAX_RETRY_AFTER_MS,
+            model,
+          });
+          return res;
+        }
         emit("warn", "upstream.retry", {
           status: res.status,
           attempt,
           retryAfter: wait,
           model,
         });
-        await Bun.sleep(wait * 1000);
+        await Bun.sleep(waitMs);
         continue;
       }
 

@@ -25,6 +25,12 @@ const LONG_CTX_BODY = JSON.stringify({
 
 const LONG_CTX_BODY_RAW = "Extra usage is required for long context requests";
 const LONG_CTX_BODY_ALT = "long context beta is not yet available";
+const OUT_OF_EXTRA_USAGE_RAW = "You're out of extra usage";
+const OUT_OF_EXTRA_USAGE_FULL =
+  "You're out of extra usage. Add more at claude.ai/settings/usage and keep going.";
+const OUT_OF_EXTRA_USAGE_JSON = JSON.stringify({
+  error: { type: "invalid_request_error", message: OUT_OF_EXTRA_USAGE_FULL },
+});
 
 const UNRELATED_400 = JSON.stringify({ error: { type: "invalid_request_error", message: "bad shape" } });
 
@@ -47,6 +53,12 @@ describe("beta-exclusion — REQ-1: isLongContextError detection", () => {
     expect(isLongContextError("")).toBe(false);
     expect(isLongContextError("{not json")).toBe(false);
     expect(isLongContextError(UNRELATED_400)).toBe(false);
+  });
+
+  test("REQ-1 detects out-of-extra-usage error (Max-subscription quota path) — raw, full sentence, JSON-wrapped", () => {
+    expect(isLongContextError(OUT_OF_EXTRA_USAGE_RAW)).toBe(true);
+    expect(isLongContextError(OUT_OF_EXTRA_USAGE_FULL)).toBe(true);
+    expect(isLongContextError(OUT_OF_EXTRA_USAGE_JSON)).toBe(true);
   });
 });
 
@@ -215,6 +227,64 @@ describe("callAnthropic — retry + telemetry", () => {
       expect(res.status).toBe(400);
       expect(callCount).toBe(1);
       expect(getExcludedBetas("claude-opus-4-6").size).toBe(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("REQ-12 429 with retry-after > MAX_RETRY_AFTER_MS surfaces immediately, no sleep, no retry", async () => {
+    // Mirrors opencode-claude-auth#211: when the upstream signals a
+    // quota-reset (hour-scale retry-after), the proxy must NOT block on
+    // Bun.sleep() — surface the response so the caller can see the error.
+    const fetchSpy = spyOn(globalThis, "fetch");
+    let callCount = 0;
+    fetchSpy.mockImplementation((async () => {
+      callCount++;
+      return new Response("quota exhausted", {
+        status: 429,
+        headers: { "retry-after": "3600" }, // 1 hour, far above the 30s cap
+      });
+    }) as unknown as typeof fetch);
+
+    try {
+      const start = Date.now();
+      const res = await callAnthropic(
+        { model: "claude-opus-4-6" },
+        { model: "claude-opus-4-6", isStream: false }
+      );
+      const elapsed = Date.now() - start;
+      expect(res.status).toBe(429);
+      expect(callCount).toBe(1); // no retry fired
+      expect(elapsed).toBeLessThan(5_000); // no hour-long sleep
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("REQ-12 429 with retry-after within cap still retries (cap engages only above threshold)", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch");
+    let callCount = 0;
+    fetchSpy.mockImplementation((async () => {
+      callCount++;
+      if (callCount === 1) {
+        return new Response("rate limited", {
+          status: 429,
+          headers: { "retry-after": "0" }, // within cap, zero-second backoff
+        });
+      }
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch);
+
+    try {
+      const res = await callAnthropic(
+        { model: "claude-opus-4-6" },
+        { model: "claude-opus-4-6", isStream: false }
+      );
+      expect(res.status).toBe(200);
+      expect(callCount).toBe(2); // retried once
     } finally {
       fetchSpy.mockRestore();
     }

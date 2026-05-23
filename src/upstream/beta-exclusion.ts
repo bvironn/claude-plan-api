@@ -15,7 +15,12 @@ const excludedBetas: Map<string, Set<string>> = new Map();
 export function isLongContextError(responseBody: string): boolean {
   return (
     responseBody.includes("Extra usage is required for long context requests") ||
-    responseBody.includes("long context beta is not yet available")
+    responseBody.includes("long context beta is not yet available") ||
+    // Max-subscription quota exhausted for 1M-context requests. Upstream
+    // returns this on cap reached; treat as long-context error so the retry
+    // loop drops `context-1m-2025-08-07` and falls back to 200k context.
+    // Mirrors opencode-claude-auth#211.
+    responseBody.includes("You're out of extra usage")
   );
 }
 

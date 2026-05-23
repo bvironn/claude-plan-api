@@ -16,12 +16,23 @@ export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 // hash signature. MUST match a version Anthropic recognises as an official
 // Claude Code release — unrecognised versions trigger safety policies
 // (including redacted thinking). The reference plugin `opencode-claude-auth`
-// uses "2.1.90" as its default, which is a known-accepted release.
+// bumped to "2.1.112" (see PR #207) which observes the real Claude Code
+// 2.1.112 request shape; we follow because Anthropic may stop recognising
+// the older 2.1.90 fingerprint over time.
 //
-// Override with env var if you're tracking a newer accepted version:
+// Override with env var if you need to track a different accepted version:
 //   ANTHROPIC_CLI_VERSION=2.1.95
-export const VERSION = Bun.env.ANTHROPIC_CLI_VERSION ?? "2.1.90";
+export const VERSION = Bun.env.ANTHROPIC_CLI_VERSION ?? "2.1.112";
 export const SALT = "59cf53e54c78";
 export const MAX_RETRIES = 3;
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 export const MAX_CONSECUTIVE_TOOL_ERRORS = 2;
+// Upper bound (ms) on how long we honour an upstream `retry-after` before
+// surfacing the error to the caller. Anthropic returns hour-scale values
+// when a Max subscription has exhausted its quota; without this cap the
+// proxy hangs indefinitely. Override with `MAX_RETRY_AFTER_MS` if you need
+// a longer window. Mirrors opencode-claude-auth#211.
+export const MAX_RETRY_AFTER_MS = parseInt(
+  Bun.env.MAX_RETRY_AFTER_MS ?? "30000",
+  10
+);

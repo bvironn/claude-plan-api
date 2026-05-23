@@ -156,7 +156,7 @@ export async function fetchUpstreamModels(): Promise<UpstreamModel[]> {
         "anthropic-beta": "oauth-2025-04-20",
         "anthropic-dangerous-direct-browser-access": "true",
         "x-app": "cli",
-        "user-agent": `claude-cli/${VERSION} (external, cli)`,
+        "user-agent": `claude-cli/${VERSION} (external, sdk-cli)`,
         "x-claude-code-session-id": SESSION_ID,
         "x-client-request-id": crypto.randomUUID(),
       },

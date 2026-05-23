@@ -135,7 +135,11 @@ export function buildHeaders(
     "anthropic-version": "2023-06-01",
     "anthropic-beta": buildBetas(model, isStructuredOutput, excluded),
     "x-app": "cli",
-    "user-agent": `claude-cli/${VERSION} (external, cli)`,
+    // Entrypoint label changed from `cli` to `sdk-cli` in Claude Code
+    // 2.1.112 (opencode-claude-auth PR #207). Anthropic correlates the
+    // user-agent string with the request fingerprint; staying on the old
+    // label after a CLI version bump risks triggering safety policies.
+    "user-agent": `claude-cli/${VERSION} (external, sdk-cli)`,
     "x-client-request-id": crypto.randomUUID(),
     "X-Claude-Code-Session-Id": SESSION_ID,
   };

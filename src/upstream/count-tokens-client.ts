@@ -34,7 +34,7 @@ export async function countTokens(anthropicBody: Record<string, unknown>): Promi
         "anthropic-dangerous-direct-browser-access": "true",
         "content-type": "application/json",
         "x-app": "cli",
-        "user-agent": `claude-cli/${VERSION} (external, cli)`,
+        "user-agent": `claude-cli/${VERSION} (external, sdk-cli)`,
         "x-claude-code-session-id": SESSION_ID,
       },
       body: JSON.stringify(anthropicBody),

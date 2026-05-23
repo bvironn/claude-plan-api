@@ -93,7 +93,7 @@ async function fetchProfile(): Promise<FullProfile | null> {
     const res = await fetch("https://api.anthropic.com/api/oauth/profile", {
       headers: {
         authorization: `Bearer ${getCredentials().accessToken}`,
-        "user-agent": `claude-cli/${VERSION} (external, cli)`,
+        "user-agent": `claude-cli/${VERSION} (external, sdk-cli)`,
         "anthropic-beta": "oauth-2025-04-20",
         accept: "application/json",
       },

@@ -31,7 +31,7 @@ const body = {
   max_tokens: 32000,
   stream: true,
   system: [
-    { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.90; cc_entrypoint=cli;" },
+    { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.112; cc_entrypoint=sdk-cli;" },
     { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
   ],
   thinking: { type: "adaptive", display: "summarized" },
@@ -86,7 +86,7 @@ const headers: Record<string, string> = {
     "fine-grained-tool-streaming-2025-05-14",
   ].join(","),
   "x-app": "cli",
-  "user-agent": "claude-cli/2.1.90 (external, cli)",
+  "user-agent": "claude-cli/2.1.112 (external, sdk-cli)",
   "x-client-request-id": reqId,
   "X-Claude-Code-Session-Id": sessId,
   "content-type": "application/json",
