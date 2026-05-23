@@ -90,12 +90,20 @@ export function buildBetas(
   parts.push("structured-outputs-2025-11-13");
   parts.push("fine-grained-tool-streaming-2025-05-14");
 
-  // Long-context beta: kept as a default for claude-opus-4-6 specifically
-  // because the existing retry loop in `anthropic-client.ts` relies on
-  // `addExcludedBeta` to DROP it when the upstream rejects a long-context
-  // request. Removing it from default would invalidate that defensive path
-  // and its tests. For opus-4-7 and other models, context-1m is opt-in
-  // (the plugin's approach) — we don't pre-add it.
+  // Long-context beta `context-1m-2025-08-07` is a transitional opt-in
+  // header that opus-4-6 requires to access its 1M context window on
+  // OAuth accounts. We attach it by default for opus-4-6 because the
+  // retry loop in `anthropic-client.ts` relies on `addExcludedBeta` to
+  // DROP it when upstream rejects a long-context request (the defensive
+  // fallback to 200k); removing it from default would invalidate that
+  // path and its tests.
+  //
+  // opus-4-7 and the 4-6 generation Sonnets DO NOT need this beta: they
+  // declare `max_input_tokens: 1_000_000` in the /v1/models catalog (see
+  // `models-client.ts`) and the 1M window is granted natively from the
+  // model id alone. Verified by hitting api.anthropic.com directly with
+  // the OAuth token. We intentionally avoid adding the beta for those
+  // models so the request fingerprint stays minimal.
   if (model === "claude-opus-4-6") {
     const idx = parts.indexOf("oauth-2025-04-20");
     parts.splice(idx + 1, 0, "context-1m-2025-08-07");
