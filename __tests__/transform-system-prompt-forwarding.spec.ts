@@ -264,4 +264,74 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(billingA).toBe(billingB);
     expect(billingA.startsWith("x-anthropic-billing-header:")).toBe(true);
   });
+
+  // --- REQ-9: clean_system opt-out drops the Claude Code identity ---
+  test("REQ-9: clean_system=true keeps billing, removes Claude Code identity", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      clean_system: true,
+      messages: [{ role: "user", content: "what model are you?" }],
+    });
+
+    const system = body.system as Block[];
+    expect(system).toHaveLength(1);
+    const billing = system[0]!.text as string;
+    expect(billing.startsWith("x-anthropic-billing-header:")).toBe(true);
+
+    // The identity text MUST NOT appear anywhere — neither as a second
+    // system entry nor leaked into the billing string.
+    expect(billing.includes("Claude Code")).toBe(false);
+    for (const entry of system) {
+      expect((entry.text as string).includes("Claude Code")).toBe(false);
+    }
+  });
+
+  // --- REQ-10: clean_system=false (default) keeps the legacy 2-entry shape ---
+  test("REQ-10: omitting clean_system preserves the default identity entry", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const system = body.system as Block[];
+    expect(system).toHaveLength(2);
+    expect((system[1]!.text as string)).toBe(
+      "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+  });
+
+  // --- REQ-11: clean_system does NOT leak into the upstream body ---
+  test("REQ-11: clean_system flag is stripped from the upstream body", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      clean_system: true,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    // The output body is built explicitly — clean_system must not be
+    // forwarded to Anthropic, which doesn't know that field.
+    expect("clean_system" in body).toBe(false);
+  });
+
+  // --- REQ-12: clean_system coexists with a client system prompt ---
+  test("REQ-12: clean_system + client system message — prompt still relocates to user", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      clean_system: true,
+      messages: [
+        { role: "system", content: "You are a friendly cat." },
+        { role: "user", content: "meow" },
+      ],
+    });
+    // system[] is billing-only (no Claude Code identity).
+    expect(body.system).toHaveLength(1);
+    // The client prompt still travels with the first user message
+    // (existing OAuth-400 mitigation; clean_system does not change that).
+    const firstMsg = (body.messages as Array<Record<string, unknown>>)[0]!;
+    const text =
+      typeof firstMsg.content === "string"
+        ? firstMsg.content
+        : ((firstMsg.content as Block[]).find((b) => b.type === "text")
+            ?.text as string);
+    expect(text.includes("You are a friendly cat")).toBe(true);
+    expect(text.includes("meow")).toBe(true);
+  });
 });

@@ -231,14 +231,25 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   // The plugin preserves cache_control from the incoming identity entry
   // when present; we construct it fresh here because our request pipeline
   // builds system[] from scratch rather than editing an incoming one.
+  //
+  // Opt-out: `clean_system: true` in the request body keeps the billing
+  // header (Anthropic requires it on OAuth requests to compute usage)
+  // but DROPS the "You are Claude Code…" identity entry, so the model
+  // doesn't introduce itself as the CLI. Used by direct chat clients
+  // (e.g. claude-plan-chat) that want a neutral conversational voice.
+  // Default `false` preserves the OpenCode / plugin parity that
+  // everything else in the request pipeline assumes.
+  const cleanSystem = body.clean_system === true;
   const system: Array<Record<string, unknown>> = [
     { type: "text", text: computeBilling(firstText) },
-    {
+  ];
+  if (!cleanSystem) {
+    system.push({
       type: "text",
       text: CLAUDE_CODE_IDENTITY,
       cache_control: { type: "ephemeral", ttl: "1h" },
-    },
-  ];
+    });
+  }
 
   addCacheControlToLastUserBlock(messages);
 
