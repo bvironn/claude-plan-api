@@ -251,6 +251,47 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     });
   }
 
+  // `runtime_system` is a per-turn metadata channel for facts the model
+  // should answer with authoritatively (model id, today's date, host
+  // platform). Unlike a client `{role:"system"}` message — which we
+  // collect and prepend to the first user message as an OAuth-400
+  // mitigation — runtime_system goes into system[] DIRECTLY and stays
+  // there: cache-free (so a new value lands every turn) and never
+  // relocated to user content (so it stays scoped as metadata, not as
+  // historical user input that the model echoes back).
+  //
+  // Wire order: [billing, claude-code-identity?, runtime_system]. The
+  // billing header MUST stay at index 0 for OAuth quota accounting;
+  // identity (when present) sits at index 1; runtime_system is appended
+  // last so the model sees it as the most recent system signal.
+  //
+  // Malformed input (non-string) is ignored with a warn log — same
+  // tolerant posture as the vision-block helper. Over-length input is
+  // truncated to RUNTIME_SYSTEM_MAX_CHARS, not rejected: callers may be
+  // composing the string from runtime data they can't fully control,
+  // and a soft truncation degrades gracefully where a thrown error
+  // would break the whole turn.
+  const RUNTIME_SYSTEM_MAX_CHARS = 8000;
+  const rawRuntime = (body as Record<string, unknown>).runtime_system;
+  if (rawRuntime !== undefined) {
+    if (typeof rawRuntime !== "string") {
+      emit("warn", "transform.runtime_system.ignored", {
+        reason: "not_a_string",
+        actualType: Array.isArray(rawRuntime) ? "array" : typeof rawRuntime,
+      });
+    } else if (rawRuntime.length > 0) {
+      let text = rawRuntime;
+      if (text.length > RUNTIME_SYSTEM_MAX_CHARS) {
+        emit("warn", "transform.runtime_system.truncated", {
+          originalLength: text.length,
+          truncatedTo: RUNTIME_SYSTEM_MAX_CHARS,
+        });
+        text = text.slice(0, RUNTIME_SYSTEM_MAX_CHARS);
+      }
+      system.push({ type: "text", text });
+    }
+  }
+
   addCacheControlToLastUserBlock(messages);
 
   const repaired = repairToolPairs(messages);

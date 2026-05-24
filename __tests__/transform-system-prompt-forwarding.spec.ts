@@ -334,4 +334,138 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     expect(text.includes("You are a friendly cat")).toBe(true);
     expect(text.includes("meow")).toBe(true);
   });
+
+  // ===========================================================================
+  // runtime_system: per-turn system[] entry that survives the user-prefix
+  // relocation. Used by clients (e.g. claude-plan-chat) to inject fresh
+  // metadata every turn — model id, today's date, host platform — without
+  // it getting cached or stuck to the first user message.
+  // ===========================================================================
+
+  const RUNTIME_TEXT =
+    "Runtime context (factual, authoritative):\n- Model id: claude-opus-4-7\n- Today is 2026-05-23";
+
+  // --- REQ-13: runtime_system populated → separate system[] entry, ordered
+  // AFTER billing and (when present) the Claude Code identity. ---
+  test("REQ-13: runtime_system appears as a separate system[] entry after billing+identity", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      runtime_system: RUNTIME_TEXT,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const system = body.system as Block[];
+    // Default (no clean_system) → billing, identity, runtime_system.
+    expect(system).toHaveLength(3);
+    expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+    expect(system[1]!.text).toBe(
+      "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+    expect(system[2]!.text).toBe(RUNTIME_TEXT);
+    // runtime_system entry MUST NOT carry cache_control — it's per-turn
+    // ephemeral metadata; caching defeats the purpose.
+    expect(system[2]!.cache_control).toBeUndefined();
+  });
+
+  // --- REQ-14: runtime_system does NOT leak into the first user message. ---
+  test("REQ-14: runtime_system stays in system[] — never prepended to first user message", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      runtime_system: RUNTIME_TEXT,
+      messages: [{ role: "user", content: "what model are you?" }],
+    });
+    const firstMsg = (body.messages as Array<Record<string, unknown>>)[0]!;
+    const firstText =
+      typeof firstMsg.content === "string"
+        ? firstMsg.content
+        : ((firstMsg.content as Block[]).find((b) => b.type === "text")
+            ?.text as string);
+    // Literal equality — runtime_system text must not appear anywhere
+    // inside the first user message content.
+    expect(firstText).toBe("what model are you?");
+    expect(firstText.includes("Runtime context")).toBe(false);
+    expect(firstText.includes("claude-opus-4-7")).toBe(false);
+  });
+
+  // --- REQ-15: runtime_system + clean_system=true → system[] is exactly
+  // [billing, runtime_system] (no identity entry). ---
+  test("REQ-15: runtime_system + clean_system=true → [billing, runtime_system] exactly", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      clean_system: true,
+      runtime_system: RUNTIME_TEXT,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const system = body.system as Block[];
+    expect(system).toHaveLength(2);
+    expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+    expect(system[1]!.text).toBe(RUNTIME_TEXT);
+    // No identity entry anywhere.
+    for (const entry of system) {
+      expect((entry.text as string).includes("Claude Code")).toBe(false);
+    }
+  });
+
+  // --- REQ-16: runtime_system + default (no clean_system) → system[] is
+  // exactly [billing, identity, runtime_system]. ---
+  test("REQ-16: runtime_system + default → [billing, identity, runtime_system] exactly", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      runtime_system: RUNTIME_TEXT,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const system = body.system as Block[];
+    expect(system).toHaveLength(3);
+    expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+    expect(system[1]!.text).toBe(
+      "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+    expect(system[2]!.text).toBe(RUNTIME_TEXT);
+  });
+
+  // --- REQ-17: runtime_system key is NOT forwarded to the upstream body. ---
+  test("REQ-17: runtime_system is stripped from the upstream body (Anthropic doesn't know it)", () => {
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      runtime_system: RUNTIME_TEXT,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect("runtime_system" in body).toBe(false);
+  });
+
+  // --- REQ-18: non-string runtime_system is ignored (no throw, no inject). ---
+  test("REQ-18: non-string runtime_system is ignored — no throw, no injection", () => {
+    let result: ReturnType<typeof openaiToAnthropic>;
+    expect(() => {
+      result = openaiToAnthropic({
+        model: "sonnet",
+        runtime_system: { not: "a string" } as unknown as string,
+        messages: [{ role: "user", content: "hi" }],
+      });
+    }).not.toThrow();
+    const system = result!.body.system as Block[];
+    // Same as if runtime_system were absent: billing + identity, length 2.
+    expect(system).toHaveLength(2);
+    expect((system[1]!.text as string)).toBe(
+      "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+    // And nothing object-shaped or stringified leaks into the entries.
+    for (const entry of system) {
+      expect((entry.text as string).includes("not")).toBe(false);
+    }
+  });
+
+  // --- REQ-19: over-length runtime_system is truncated to 8000 chars. ---
+  test("REQ-19: runtime_system longer than 8000 chars is truncated to 8000", () => {
+    const overlong = "x".repeat(9000);
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      runtime_system: overlong,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const system = body.system as Block[];
+    expect(system).toHaveLength(3);
+    const injected = system[2]!.text as string;
+    expect(injected.length).toBe(8000);
+    expect(injected).toBe("x".repeat(8000));
+  });
 });
