@@ -344,3 +344,69 @@ describe("account.ensureProfile — inflight dedup", () => {
     expect(fetchSpy.mock.calls.length).toBe(1);
   });
 });
+
+describe("account.ensureProfile — cache hit", () => {
+  // R5: a successful prior ensureProfile() must serve subsequent calls from
+  // cache (no upstream fetch). refreshProfile(), by contrast, must always
+  // invoke an upstream fetch and replace the cache, regardless of state.
+
+  const UPSTREAM = {
+    account: { uuid: "acc-r5", has_claude_max: true },
+    organization: { uuid: "org-r5", has_extra_usage_enabled: false },
+    application: { uuid: "app-r5" },
+  };
+
+  let fetchSpy: ReturnType<typeof spyOn> | null = null;
+  let credentialsSpy: ReturnType<typeof spyOn> | null = null;
+
+  beforeEach(async () => {
+    const credModule = await import("../src/domain/credentials.ts");
+    credentialsSpy = spyOn(credModule, "getCredentials").mockReturnValue({
+      accessToken: "fake-token",
+      refreshToken: "fake-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    } as ReturnType<typeof credModule.getCredentials>);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+      new Response(JSON.stringify(UPSTREAM), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch);
+  });
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    credentialsSpy?.mockRestore();
+    fetchSpy = null;
+    credentialsSpy = null;
+  });
+
+  test("second ensureProfile() is a cache hit — no upstream fetch, same reference", async () => {
+    const account = await loadFreshAccountModule();
+
+    const first = await account.ensureProfile(); // cold → 1 fetch
+    expect(first).not.toBeNull();
+    expect(fetchSpy!.mock.calls.length).toBe(1);
+
+    fetchSpy!.mockClear();
+    const second = await account.ensureProfile(); // hot → 0 fetches
+    expect(fetchSpy!.mock.calls.length).toBe(0);
+    expect(second).toBe(first); // same cached FullProfile reference
+  });
+
+  test("refreshProfile() bypasses the cache — always fetches and replaces", async () => {
+    const account = await loadFreshAccountModule();
+
+    const cold = await account.ensureProfile(); // cold → 1 fetch
+    expect(cold).not.toBeNull();
+    expect(fetchSpy!.mock.calls.length).toBe(1);
+
+    fetchSpy!.mockClear();
+    const refreshed = await account.refreshProfile(); // forced → 1 new fetch
+    expect(fetchSpy!.mock.calls.length).toBe(1);
+    expect(refreshed).not.toBeNull();
+    // The cache reference is replaced: the snapshot now points to the new profile.
+    expect(account.getProfileSnapshot()).toBe(refreshed);
+    // And the replaced reference is not the previous cold reference.
+    expect(refreshed).not.toBe(cold);
+  });
+});
