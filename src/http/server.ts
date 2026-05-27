@@ -2,6 +2,7 @@ import { PORT, BIND_HOST } from "../config.ts";
 import { handleHealth } from "./routes/health.ts";
 import { handleModels } from "./routes/models.ts";
 import { handleChat } from "./routes/chat.ts";
+import { handleCompletions } from "./routes/completions.ts";
 import { handleTokensCount } from "./routes/tokens.ts";
 import { handleAccountProfile } from "./routes/account.ts";
 import {
@@ -31,6 +32,7 @@ function isApiOwned(pathname: string): boolean {
 const observedHealth = withObservability(() => Promise.resolve(handleHealth()));
 const observedModels = withObservability(() => Promise.resolve(handleModels()));
 const observedChat = withObservability(handleChat);
+const observedCompletions = withObservability(handleCompletions);
 const observedTokensCount = withObservability(handleTokensCount);
 const observedAccountProfile = withObservability(handleAccountProfile);
 
@@ -55,6 +57,7 @@ export function startServer() {
         if (method === "GET" && pathname === "/health") return await observedHealth(req);
         if (method === "GET" && pathname === "/v1/models") return await observedModels(req);
         if (method === "POST" && pathname === "/v1/chat/completions") return await observedChat(req);
+        if (method === "POST" && pathname === "/v1/completions") return await observedCompletions(req);
         if (method === "POST" && pathname === "/v1/tokens/count") return await observedTokensCount(req);
         if (method === "GET" && pathname === "/api/account/profile") return await observedAccountProfile(req);
 
