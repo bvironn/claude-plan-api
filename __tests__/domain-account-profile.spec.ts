@@ -260,3 +260,87 @@ describe("account.fetchProfile — log emit shape", () => {
     expect(fetchedCalls.length).toBe(0);
   });
 });
+
+describe("account.ensureProfile — inflight dedup", () => {
+  // R4: two concurrent ensureProfile() calls while the cache is empty MUST
+  // fire exactly one upstream fetch, and both promises MUST resolve to the
+  // same FullProfile reference. After settle, the inflight slot must clear
+  // so a subsequent call against an empty cache fires a new fetch.
+
+  const UPSTREAM = {
+    account: { uuid: "acc-r4", has_claude_max: true },
+    organization: { uuid: "org-r4", has_extra_usage_enabled: false },
+    application: { uuid: "app-r4" },
+  };
+
+  let fetchSpy: ReturnType<typeof spyOn> | null = null;
+  let credentialsSpy: ReturnType<typeof spyOn> | null = null;
+
+  beforeEach(async () => {
+    const credModule = await import("../src/domain/credentials.ts");
+    credentialsSpy = spyOn(credModule, "getCredentials").mockReturnValue({
+      accessToken: "fake-token",
+      refreshToken: "fake-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    } as ReturnType<typeof credModule.getCredentials>);
+  });
+
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    credentialsSpy?.mockRestore();
+    fetchSpy = null;
+    credentialsSpy = null;
+  });
+
+  test("two concurrent ensureProfile() calls share one fetch and return the same reference", async () => {
+    // Deferred-promise pattern: capture the resolve fn so we can hold the
+    // fetch in flight while we register a second caller, then settle.
+    let resolveFetch: ((value: Response) => void) | undefined;
+    const fetchPromise = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => fetchPromise) as unknown as typeof fetch);
+
+    const account = await loadFreshAccountModule();
+
+    // Kick off both calls BEFORE settling. Both must observe the inflight
+    // slot and dedup onto the same promise.
+    const callA = account.ensureProfile();
+    const callB = account.ensureProfile();
+
+    // Now settle the upstream fetch.
+    resolveFetch!(new Response(JSON.stringify(UPSTREAM), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    const [a, b] = await Promise.all([callA, callB]);
+
+    expect(fetchSpy.mock.calls.length).toBe(1);
+    expect(a).not.toBeNull();
+    expect(a).toBe(b); // same FullProfile reference (===)
+  });
+
+  test("inflight slot clears after settle so a later cold call fires a new fetch", async () => {
+    // First fetch returns a profile (cache miss → populated, then we'll
+    // bypass the cache via refreshProfile to assert the inflight slot is
+    // not pinned). Note: ensureProfile() would return the cached value
+    // here, so we use refreshProfile() to force a second fetch — that
+    // proves the inflight slot was cleared (otherwise refresh would also
+    // dedup against a leftover pending promise).
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+      new Response(JSON.stringify(UPSTREAM), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch);
+
+    const account = await loadFreshAccountModule();
+
+    await account.ensureProfile(); // cold → 1 fetch
+    expect(fetchSpy.mock.calls.length).toBe(1);
+
+    fetchSpy.mockClear();
+    await account.refreshProfile(); // forced → must fetch again
+    expect(fetchSpy.mock.calls.length).toBe(1);
+  });
+});
