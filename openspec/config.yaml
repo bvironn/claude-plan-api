@@ -1,0 +1,57 @@
+schema: spec-driven
+
+context: |
+  Project: claude-plan-api
+  Runtime: Bun (bun:test, Bun.serve, bun:sqlite)
+  Language: TypeScript (strict ESNext, moduleResolution: bundler)
+  Architecture: Hexagonal-lite — domain/, http/routes/, upstream/, transform/, observability/
+  Testing: bun test — 204/206 pass; 2 environment-only failures (Windows PATH)
+  Conventions: CLAUDE.md mandates Bun over Node; no express/jest/vitest; pino for logging
+
+strict_tdd: true
+test_command: bun test
+
+testing:
+  runner: bun test
+  framework: bun:test
+  unit:
+    available: true
+    tool: bun:test
+  integration:
+    available: true
+    tool: bun:test (HTTP route handlers tested via direct function calls + fetch mocks)
+  e2e:
+    available: false
+  coverage:
+    available: false
+    note: bun test has no built-in coverage flag yet; c8/istanbul not configured
+  quality:
+    linter: false
+    type_checker: true
+    command: bun run tsc --noEmit
+    formatter: false
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Respect Bun-first conventions from CLAUDE.md
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+    - No express/jest/vitest — Bun native APIs only
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns (bun:test spyOn, fetch mocks)
+    tdd: true
+    test_command: bun test
+  verify:
+    test_command: bun test
+    build_command: bun run tsc --noEmit
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
