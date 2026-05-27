@@ -122,6 +122,222 @@ export interface TransformResult {
   isStructuredOutput: boolean;
 }
 
+/**
+ * Sanitize OpenAI-shape messages BEFORE the openaiToAnthropic transform.
+ *
+ * Anthropic rejects requests with empty text content blocks (HTTP 400:
+ * "messages.N.content.M.text: Input should be a valid string with at least
+ * 1 character"). Clients like Continue.dev occasionally emit such blocks
+ * on regenerate/cancel paths. This pre-pass normalizes the input so the
+ * downstream translation never has to know about empty-content edge cases.
+ *
+ * Rules per role:
+ *   - assistant: filter `{type:"text", text:trim()===""}` blocks from array
+ *     content. If filtered array becomes empty AND the message has no
+ *     `tool_calls`, the message is DROPPED. If it has `tool_calls`, the
+ *     message is preserved (content normalized to `[]`).
+ *   - user: empty/whitespace string → `"(empty message)"`. `null`/`undefined`
+ *     → placeholder array. Empty array or array of only empty text →
+ *     placeholder array. Mixed arrays drop empty text blocks but keep
+ *     non-text blocks (e.g. images).
+ *   - system / tool / other roles: pass through UNCHANGED.
+ *
+ * Purity guarantees:
+ *   - Returns a new array (`result !== input`).
+ *   - Original message objects are not mutated; clones are produced when a
+ *     mutation is needed.
+ *   - `sanitize(sanitize(x))` deep-equals `sanitize(x)` (idempotent).
+ *
+ * Observability:
+ *   - Emits `transform.sanitize.mutated` at `warn` level EXACTLY ONCE per
+ *     mutated message (not once per block). Payload:
+ *     `{role, mutation_type, original_block_count}` where `mutation_type`
+ *     is one of the values in `SANITIZE_MUTATION_TYPES`.
+ */
+export const SANITIZE_MUTATION_TYPES = {
+  droppedEmptyAssistant: "dropped_empty_assistant",
+  filteredEmptyTextBlocks: "filtered_empty_text_blocks",
+  replacedEmptyUserString: "replaced_empty_user_string",
+  replacedEmptyUserArray: "replaced_empty_user_array",
+  replacedNullUserContent: "replaced_null_user_content",
+} as const;
+
+export const EMPTY_MESSAGE_PLACEHOLDER = "(empty message)";
+
+function isEmptyTextBlock(block: unknown): boolean {
+  if (typeof block !== "object" || block === null) return false;
+  const b = block as Record<string, unknown>;
+  if (b.type !== "text") return false;
+  const t = b.text;
+  return typeof t !== "string" || t.trim().length === 0;
+}
+
+function isWhitespaceOnlyString(s: unknown): boolean {
+  return typeof s === "string" && s.trim().length === 0;
+}
+
+function emitMutation(
+  role: string,
+  mutationType: string,
+  originalBlockCount: number,
+): void {
+  emit("warn", "transform.sanitize.mutated", {
+    role,
+    mutation_type: mutationType,
+    original_block_count: originalBlockCount,
+  });
+}
+
+export function sanitizeOpenAIMessages(
+  messages: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+
+  for (const msg of messages) {
+    const role = msg.role as string;
+
+    // Pass through unknown / system / tool roles untouched.
+    if (role !== "assistant" && role !== "user") {
+      out.push(msg);
+      continue;
+    }
+
+    const content = msg.content;
+
+    if (role === "assistant") {
+      const hasToolCalls =
+        Array.isArray(msg.tool_calls) && (msg.tool_calls as unknown[]).length > 0;
+
+      // null/undefined content → normalize to []; drop iff no tool_calls.
+      if (content === null || content === undefined) {
+        if (!hasToolCalls) {
+          emitMutation(
+            role,
+            SANITIZE_MUTATION_TYPES.droppedEmptyAssistant,
+            0,
+          );
+          continue; // drop message
+        }
+        // Preserve message but normalize content to [].
+        const cloned: Record<string, unknown> = { ...msg, content: [] };
+        emitMutation(
+          role,
+          SANITIZE_MUTATION_TYPES.filteredEmptyTextBlocks,
+          0,
+        );
+        out.push(cloned);
+        continue;
+      }
+
+      if (Array.isArray(content)) {
+        const arr = content as Array<Record<string, unknown>>;
+        const originalCount = arr.length;
+        const filtered = arr.filter((block) => !isEmptyTextBlock(block));
+        const mutated = filtered.length !== originalCount;
+
+        if (filtered.length === 0 && !hasToolCalls) {
+          // Drop the message entirely.
+          emitMutation(
+            role,
+            SANITIZE_MUTATION_TYPES.droppedEmptyAssistant,
+            originalCount,
+          );
+          continue;
+        }
+
+        if (mutated) {
+          const cloned: Record<string, unknown> = { ...msg, content: filtered };
+          emitMutation(
+            role,
+            SANITIZE_MUTATION_TYPES.filteredEmptyTextBlocks,
+            originalCount,
+          );
+          out.push(cloned);
+        } else {
+          // No change — pass through.
+          out.push(msg);
+        }
+        continue;
+      }
+
+      // String or other content shape on assistant — pass through unchanged.
+      out.push(msg);
+      continue;
+    }
+
+    // role === "user"
+    if (content === null || content === undefined) {
+      const cloned: Record<string, unknown> = {
+        ...msg,
+        content: [{ type: "text", text: EMPTY_MESSAGE_PLACEHOLDER }],
+      };
+      emitMutation(
+        role,
+        SANITIZE_MUTATION_TYPES.replacedNullUserContent,
+        0,
+      );
+      out.push(cloned);
+      continue;
+    }
+
+    if (typeof content === "string") {
+      if (isWhitespaceOnlyString(content)) {
+        const cloned: Record<string, unknown> = {
+          ...msg,
+          content: EMPTY_MESSAGE_PLACEHOLDER,
+        };
+        emitMutation(
+          role,
+          SANITIZE_MUTATION_TYPES.replacedEmptyUserString,
+          0,
+        );
+        out.push(cloned);
+      } else {
+        out.push(msg);
+      }
+      continue;
+    }
+
+    if (Array.isArray(content)) {
+      const arr = content as Array<Record<string, unknown>>;
+      const originalCount = arr.length;
+      const filtered = arr.filter((block) => !isEmptyTextBlock(block));
+
+      if (filtered.length === 0) {
+        const cloned: Record<string, unknown> = {
+          ...msg,
+          content: [{ type: "text", text: EMPTY_MESSAGE_PLACEHOLDER }],
+        };
+        emitMutation(
+          role,
+          SANITIZE_MUTATION_TYPES.replacedEmptyUserArray,
+          originalCount,
+        );
+        out.push(cloned);
+        continue;
+      }
+
+      if (filtered.length !== originalCount) {
+        const cloned: Record<string, unknown> = { ...msg, content: filtered };
+        emitMutation(
+          role,
+          SANITIZE_MUTATION_TYPES.filteredEmptyTextBlocks,
+          originalCount,
+        );
+        out.push(cloned);
+      } else {
+        out.push(msg);
+      }
+      continue;
+    }
+
+    // Any other content shape on user — pass through.
+    out.push(msg);
+  }
+
+  return out;
+}
+
 export function openaiToAnthropic(body: Record<string, unknown>): TransformResult {
   resetDynamicMap();
   const { id: model, effort: suffixEffort } = resolveModelVariant(
@@ -145,7 +361,14 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   const messages: AnthropicMessage[] = [];
   let systemPrompt: string | null = null;
 
-  for (const msg of (body.messages as Array<Record<string, unknown>>) || []) {
+  // Pre-pass: sanitize empty text blocks and empty user content BEFORE the
+  // translation loop. Anthropic rejects empty text blocks ("Input should be
+  // a valid string with at least 1 character"); some clients (Continue.dev)
+  // emit them on regenerate/cancel paths. See sanitizeOpenAIMessages docs.
+  const rawMessages = (body.messages as Array<Record<string, unknown>>) || [];
+  const sanitizedMessages = sanitizeOpenAIMessages(rawMessages);
+
+  for (const msg of sanitizedMessages) {
     if (msg.role === "system") {
       const text = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${text}` : text;
