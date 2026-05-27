@@ -1,5 +1,18 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn, beforeEach, afterEach } from "bun:test";
 import { __normalizeProfileForTests as normalize } from "../src/domain/account.ts";
+import * as logger from "../src/observability/logger.ts";
+
+// Module-reset utility: each call returns a freshly-evaluated copy of
+// src/domain/account.ts with `cachedProfile` and `inflight` cleared. We
+// abuse Bun's module loader: a different `?v=N` query string forces a
+// re-evaluation, giving us a pristine module-level state per test. The
+// re-imported module still pulls `emit` from the canonical logger module,
+// so spies set up on logger.ts capture its emit calls correctly.
+let __accountModuleCounter = 0;
+async function loadFreshAccountModule(): Promise<typeof import("../src/domain/account.ts")> {
+  __accountModuleCounter += 1;
+  return await import(`../src/domain/account.ts?v=${__accountModuleCounter}`);
+}
 
 describe("account.normalize — happy path shape from Anthropic", () => {
   // This is the literal shape returned by Anthropic's /api/oauth/profile
@@ -158,5 +171,92 @@ describe("account.normalize — defensive coercion", () => {
     // Strict identity check — guard against accidental === "true" regressions.
     expect(p.organization.hasExtraUsageEnabled === true).toBe(true);
     expect(typeof p.organization.hasExtraUsageEnabled).toBe("boolean");
+  });
+});
+
+describe("account.fetchProfile — log emit shape", () => {
+  // R3: ensureProfile() must emit exactly one `account.profile.fetched`
+  // info event on success, with a payload containing the six named keys.
+  // On upstream failure (non-2xx or thrown), it must NOT emit that event.
+
+  // Minimal upstream payload — only what's needed to exercise emit.
+  const UPSTREAM = {
+    account: {
+      uuid: "acc-r3",
+      full_name: "R3 User",
+      email: "r3@example.com",
+      has_claude_max: true,
+    },
+    organization: {
+      uuid: "org-r3",
+      organization_type: "claude_max",
+      has_extra_usage_enabled: true,
+      subscription_status: "active",
+      rate_limit_tier: "default_claude_max_20x",
+    },
+    application: { uuid: "app-r3", name: "Claude Code", slug: "claude-code" },
+  };
+
+  let emitSpy: ReturnType<typeof spyOn> | null = null;
+  let fetchSpy: ReturnType<typeof spyOn> | null = null;
+  let credentialsSpy: ReturnType<typeof spyOn> | null = null;
+
+  beforeEach(async () => {
+    const credModule = await import("../src/domain/credentials.ts");
+    credentialsSpy = spyOn(credModule, "getCredentials").mockReturnValue({
+      accessToken: "fake-token",
+      refreshToken: "fake-refresh",
+      expiresAt: Date.now() + 3_600_000,
+    } as ReturnType<typeof credModule.getCredentials>);
+    emitSpy = spyOn(logger, "emit");
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      return new Response(JSON.stringify(UPSTREAM), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch);
+  });
+
+  afterEach(() => {
+    emitSpy?.mockRestore();
+    fetchSpy?.mockRestore();
+    credentialsSpy?.mockRestore();
+    emitSpy = null;
+    fetchSpy = null;
+    credentialsSpy = null;
+  });
+
+  test("success path emits exactly one account.profile.fetched info event with the six named keys", async () => {
+    const account = await loadFreshAccountModule();
+    const profile = await account.ensureProfile();
+    expect(profile).not.toBeNull();
+
+    const fetchedCalls = emitSpy!.mock.calls.filter((c) => c[1] === "account.profile.fetched");
+    expect(fetchedCalls.length).toBe(1);
+
+    const [level, , payload] = fetchedCalls[0]!;
+    expect(level).toBe("info");
+    const p = payload as Record<string, unknown>;
+    // Six named keys MUST be present (spec R3). Extra keys are allowed.
+    expect(p).toHaveProperty("accountUuid");
+    expect(p).toHaveProperty("organizationUuid");
+    expect(p).toHaveProperty("organizationType");
+    expect(p).toHaveProperty("subscriptionStatus");
+    expect(p).toHaveProperty("rateLimitTier");
+    expect(p).toHaveProperty("hasExtraUsageEnabled");
+    // hasExtraUsageEnabled must match the normalized boolean for that profile.
+    expect(p.hasExtraUsageEnabled).toBe(true);
+    expect(p.accountUuid).toBe("acc-r3");
+    expect(p.organizationUuid).toBe("org-r3");
+  });
+
+  test("failure path (non-2xx upstream) does NOT emit account.profile.fetched", async () => {
+    fetchSpy!.mockImplementation((async () =>
+      new Response("nope", { status: 500 })) as unknown as typeof fetch);
+    const account = await loadFreshAccountModule();
+    const profile = await account.ensureProfile();
+    expect(profile).toBeNull();
+    const fetchedCalls = emitSpy!.mock.calls.filter((c) => c[1] === "account.profile.fetched");
+    expect(fetchedCalls.length).toBe(0);
   });
 });
