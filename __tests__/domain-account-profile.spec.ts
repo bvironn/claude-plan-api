@@ -117,7 +117,9 @@ describe("account.normalize — defensive coercion", () => {
     expect(p.organization.rateLimitTier).toBeNull();
   });
 
-  test("has_extra_usage_enabled gates on strict true", () => {
+  test("has_extra_usage_enabled is false unless upstream sends literal true", () => {
+    // R2: strict gating — only the JSON boolean `true` flips the flag on.
+    // Everything else (including null, "false", and literal false) coerces to false.
     expect(normalize({ organization: { has_extra_usage_enabled: true } })
       .organization.hasExtraUsageEnabled).toBe(true);
     expect(normalize({ organization: { has_extra_usage_enabled: 1 } })
@@ -125,6 +127,13 @@ describe("account.normalize — defensive coercion", () => {
     expect(normalize({ organization: { has_extra_usage_enabled: "true" } })
       .organization.hasExtraUsageEnabled).toBe(false);
     expect(normalize({ organization: {} })
+      .organization.hasExtraUsageEnabled).toBe(false);
+    // R2 additions: null, string "false", and literal false must all coerce to false.
+    expect(normalize({ organization: { has_extra_usage_enabled: null } })
+      .organization.hasExtraUsageEnabled).toBe(false);
+    expect(normalize({ organization: { has_extra_usage_enabled: "false" } })
+      .organization.hasExtraUsageEnabled).toBe(false);
+    expect(normalize({ organization: { has_extra_usage_enabled: false } })
       .organization.hasExtraUsageEnabled).toBe(false);
   });
 
