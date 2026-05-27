@@ -231,7 +231,7 @@ describe("account.fetchProfile — log emit shape", () => {
     const profile = await account.ensureProfile();
     expect(profile).not.toBeNull();
 
-    const fetchedCalls = emitSpy!.mock.calls.filter((c) => c[1] === "account.profile.fetched");
+    const fetchedCalls = (emitSpy!.mock.calls as unknown[][]).filter((c) => c[1] === "account.profile.fetched");
     expect(fetchedCalls.length).toBe(1);
 
     const [level, , payload] = fetchedCalls[0]!;
@@ -256,7 +256,7 @@ describe("account.fetchProfile — log emit shape", () => {
     const account = await loadFreshAccountModule();
     const profile = await account.ensureProfile();
     expect(profile).toBeNull();
-    const fetchedCalls = emitSpy!.mock.calls.filter((c) => c[1] === "account.profile.fetched");
+    const fetchedCalls = (emitSpy!.mock.calls as unknown[][]).filter((c) => c[1] === "account.profile.fetched");
     expect(fetchedCalls.length).toBe(0);
   });
 });
