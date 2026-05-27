@@ -103,4 +103,27 @@ describe("GET /api/account/profile", () => {
     // behaviour — the contract is "never 500".
     expect([200, 502]).toContain(res.status);
   });
+
+  test("hasExtraUsageEnabled: true reaches the HTTP response body as JSON boolean", async () => {
+    // R1 (HTTP layer): when upstream returns `has_extra_usage_enabled: true`,
+    // the JSON body must surface `organization.hasExtraUsageEnabled === true`
+    // — boolean, not the string "true", not 1.
+    const UPSTREAM_PROFILE_TRUE = {
+      ...UPSTREAM_PROFILE,
+      organization: { ...UPSTREAM_PROFILE.organization, has_extra_usage_enabled: true },
+    };
+    fetchSpy!.mockImplementationOnce(async () => new Response(JSON.stringify(UPSTREAM_PROFILE_TRUE), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const res = await handleAccountProfile(
+      new Request("http://localhost/api/account/profile?refresh=1"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    const org = body.organization as Record<string, unknown>;
+    expect(org.hasExtraUsageEnabled).toBe(true);
+    expect(org.hasExtraUsageEnabled === true).toBe(true);
+    expect(typeof org.hasExtraUsageEnabled).toBe("boolean");
+  });
 });

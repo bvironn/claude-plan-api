@@ -138,4 +138,16 @@ describe("account.normalize — defensive coercion", () => {
     expect(p.organization.uuid).toBeNull();
     // No crash, no warnings. Forward-compat.
   });
+
+  test("has_extra_usage_enabled: true propagates as strict boolean true", () => {
+    // R1 (domain layer): upstream `true` must reach FullProfile.organization
+    // as the JSON boolean `true`, never coerced to 1, "true", or truthy-anything.
+    const p = normalize({
+      organization: { has_extra_usage_enabled: true },
+    });
+    expect(p.organization.hasExtraUsageEnabled).toBe(true);
+    // Strict identity check — guard against accidental === "true" regressions.
+    expect(p.organization.hasExtraUsageEnabled === true).toBe(true);
+    expect(typeof p.organization.hasExtraUsageEnabled).toBe("boolean");
+  });
 });
