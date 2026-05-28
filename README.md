@@ -1,30 +1,21 @@
 <div align="center">
 
-```
-   ┌─ openai dialect ─┐         ┌─ anthropic ─┐
-   │                  │ ──────▶ │              │
-   │   /v1/chat/...   │ ◀────── │  /messages   │
-   └──────────────────┘         └──────────────┘
-              │                        │
-              └──── full audit ────────┘
-                       on disk
-```
-
 # claude-plan-api
 
 **OpenAI-compatible gateway for Claude Max.**
 *Speaks the dialect. Logs every byte. Ships the dashboard.*
 
-[Run it](#run-it) · [API](#api) · [Dashboard](#dashboard) · [Plaintext reasoning](#about-that-plaintext-reasoning) · [Architecture](#architecture) · [Disclaimer](#disclaimer-being-honest-about-it)
-
 ![Bun](https://img.shields.io/badge/Bun-latest-fbf0df?logo=bun&logoColor=000)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=fff)
-![Tests](https://img.shields.io/badge/tests-195%20passing-3fb950)
 ![License](https://img.shields.io/badge/license-MIT-1f1d1a)
+
+experimental · unaffiliated with Anthropic · do not deploy to paying users
 
 </div>
 
 ---
+
+## Pitch
 
 Nothing you couldn't build yourself in a weekend, except we spent about
 twenty commits tracking down one specific server behaviour so you don't have
@@ -38,7 +29,7 @@ Three things it does, in this order of importance:
 3. **Ships a dashboard** that treats an LLM call as a first-class object:
    readable, searchable, replayable.
 
-## Disclaimer, being honest about it
+## Disclaimer
 
 This gateway authenticates with Anthropic using your Claude Code OAuth
 credentials. Anthropic's Terms of Service state those tokens are for official
@@ -53,30 +44,26 @@ is the moving ground.
 Use at your own discretion. Do not put this behind a product you charge money
 for.
 
-## Requirements
+## Quickstart
 
-| | |
-| --- | --- |
-| Runtime | Bun, latest stable |
-| Credentials | Authenticated Claude Code install (`~/.claude/.credentials.json`, override with `CREDENTIALS_PATH`) |
-| Disk | A few hundred MB if you log heavily; SQLite WAL grows with traffic |
-| Network | Outbound HTTPS to `api.anthropic.com` |
-
-## Run it
+Bun (latest stable), an authenticated Claude Code install
+(`~/.claude/.credentials.json`), and outbound HTTPS to `api.anthropic.com`.
 
 ```bash
 bun install
-bun run src/index.ts          # port 3456
-bun run src/index.ts 3457     # override
+bun run src/index.ts                                # default port 3456
+curl -s http://127.0.0.1:3456/v1/models | jq '.data[0]'
+# → { id, object, created, owned_by }
 ```
 
-The backend serves the prebuilt dashboard from `src/ui/dist/`. If no build
-exists, `GET /` returns a 503 telling you to build — see [Build](#build).
+If you get `401 Unauthorized`, re-run `claude` once to refresh credentials.
+Pass a different port as the first CLI arg: `bun run src/index.ts 3457`.
 
 ## API
 
 OpenAI-compatible surface, plus a telemetry surface that exposes the audit
 log over HTTP. Point any existing OpenAI client at the base URL and it works.
+Event model and SQLite schema: [`OBSERVABILITY.md`](./OBSERVABILITY.md).
 
 | Endpoint | Scope | Purpose |
 | --- | --- | --- |
@@ -91,11 +78,6 @@ log over HTTP. Point any existing OpenAI client at the base URL and it works.
 | `GET /api/telemetry/stream` | telemetry | SSE live feed of new events |
 | `GET /api/telemetry/metrics` | telemetry | aggregated metrics for a window |
 | `GET /api/telemetry/export` | telemetry | CSV or JSON export |
-
-```bash
-curl -s "http://127.0.0.1:3456/api/telemetry/requests?limit=5" \
-  | jq '.requests[] | {traceId, model, duration, inputTokens, outputTokens}'
-```
 
 The SQLite store at `logs/telemetry.db` is also directly queryable. No
 abstraction to learn, no ORM to fight.
@@ -155,11 +137,13 @@ event store and an in-memory credential cache.
 | `src/domain/` | account, credentials, models, tool-mapping |
 | `src/ui/` | Vite + React 19 SPA — separate sub-project |
 
-Frontend is Vite + React 19 + TanStack Router (file-based) + TanStack Query +
-Tailwind v4 + shadcn/ui. Builds to a static SPA served by the backend on the
-same port. No CORS dance, no separate deploy, no nginx config.
+Frontend is Vite + React 19 + TanStack Router + TanStack Query + Tailwind v4
++ shadcn/ui. Builds to a static SPA served by the backend on the same port.
+No CORS dance, no separate deploy.
 
-## Development
+## Development & build
+
+### Run
 
 Two terminals from the repo root:
 
@@ -175,59 +159,44 @@ bun run dev                   # http://localhost:5173
 
 Vite proxies `/api`, `/v1`, and `/health` to `http://127.0.0.1:3457`. HMR is on.
 
-## Build
+### Build
 
 ```bash
 cd src/ui
 bun run build                 # tsr generate && tsc -b && vite build → src/ui/dist/
 ```
 
-The backend picks up the bundle automatically on the next request.
+The backend picks up the bundle automatically; if no build exists, `GET /`
+returns a 503 telling you to build.
 
-## Test and typecheck
+### Test
 
 ```bash
-bun test                      # full backend suite — 195 tests
-bunx tsc --noEmit             # backend typecheck — 0 errors
+bun test                      # full backend suite
+bunx tsc --noEmit             # backend typecheck
 cd src/ui && bun run typecheck
 ```
 
-The repo follows Strict TDD for behavioural changes (see `CLAUDE.md`). `bun
-test` is the merge gate.
+Strict TDD for behavioural changes (see [`CLAUDE.md`](./CLAUDE.md)); `bun test` is the merge gate.
 
 ## Configuration
 
-| Env | Default | Notes |
-| --- | --- | --- |
-| `PORT` | `3456` | first CLI arg overrides |
-| `BIND_HOST` | `127.0.0.1` | Defaults to loopback so the proxy is not exposed by accident. Set to `0.0.0.0` (or a specific IP) only if you knowingly want to expose the service — remember this gateway authenticates to Anthropic with **your** OAuth token. |
-| `CREDENTIALS_PATH` | `~/.claude/.credentials.json` | OAuth credentials source |
+| Variable | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `PORT` | integer | `3456` | Listen port; the first CLI arg overrides this. |
+| `BIND_HOST` | string | `127.0.0.1` | Loopback by default. Set to `0.0.0.0` or a specific IP only if you knowingly want LAN or public exposure — remember the gateway authenticates to Anthropic with **your** OAuth token. |
+| `CREDENTIALS_PATH` | path | `~/.claude/.credentials.json` | OAuth credentials source. |
+| `ANTHROPIC_CLI_VERSION` | string | `2.1.112` | CLI version reported in user-agent and billing header. MUST match an Anthropic-recognised Claude Code release; unrecognised versions trigger safety policies (including redacted thinking). |
+| `MAX_RETRY_AFTER_MS` | integer (ms) | `30000` | Upper bound on honoured upstream `retry-after`. Anthropic returns hour-scale values when a Max quota is exhausted; this cap prevents the proxy from hanging indefinitely. |
 
-## About that plaintext reasoning
+## Adaptive thinking — the short version
 
-Anthropic exposes two different contracts for thinking on the same endpoint,
-and the documentation does not make the distinction obvious. They are not
-interchangeable.
+Anthropic exposes two thinking contracts on the same endpoint: `enabled`
+(opaque ciphertext, useless for audit) and `adaptive` + `summarized`
+(plaintext deltas matching the official CLI). This gateway picks the second
+— see [`docs/adaptive-thinking.md`](./docs/adaptive-thinking.md).
 
-Send `thinking: { type: "enabled", budget_tokens: N }` and the server assumes
-you intend to re-inject the ciphertext signature on the next turn. You get
-back an empty thinking block shell and a signed blob that is opaque to anyone
-without Anthropic's private keys. Private compute. Great for multi-turn agent
-frameworks that want opacity. Useless for an audit pipeline where you want to
-actually read what the model was thinking.
-
-Send `thinking: { type: "adaptive", display: "summarized" }` together with
-`output_config: { effort }` and the server emits `thinking_delta` events
-containing the model's reasoning in plaintext. It is summarized — not the raw
-internal monologue — but it is readable, and it matches what the official
-Claude Code CLI and the OpenCode anthropic plugin emit on the wire.
-
-This gateway picks the second form. That is the entire unlock. Dozens of
-commits of investigation, one field difference, one lesson learned: when you
-claim byte-for-byte parity with another client, verify it with a real wire
-capture. Reading their source is not the same thing.
-
-## What this is not
+## Project status & scope
 
 Not production-ready in the enterprise sense. Not audited for security. Not
 supported by Anthropic. Not multi-tenant — it reads credentials from disk and
@@ -242,12 +211,10 @@ doing on a Claude Max subscription, today.
 | --- | --- |
 | [`OBSERVABILITY.md`](./OBSERVABILITY.md) | event model, SQLite schema, API surface, retention |
 | [`CLAUDE.md`](./CLAUDE.md) | agent conventions for this codebase (Bun-first rules) |
-| [`LICENSE`](./LICENSE) | MIT |
+| [`docs/adaptive-thinking.md`](./docs/adaptive-thinking.md) | the long version of §Adaptive thinking |
+| [`docs/audit-2026-04-17.md`](./docs/audit-2026-04-17.md) | a snapshot audit of the gateway behaviour |
+| [`openspec/`](./openspec/) | spec-driven change history and active proposals |
 
----
+## License
 
-<div align="center">
-
-Built with **Bun** · **TypeScript** · **React 19** · **TanStack** · **shadcn/ui** · **SQLite**
-
-</div>
+[MIT](./LICENSE).
