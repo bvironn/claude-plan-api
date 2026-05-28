@@ -21,9 +21,21 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-# Anchor to repo root regardless of invocation cwd
+# Anchor to repo root regardless of invocation cwd or archive depth.
+# Uses `git rev-parse --show-toplevel` so the script keeps working after
+# being moved into openspec/changes/archive/YYYY-MM-DD-{change}/.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot  = Resolve-Path (Join-Path $scriptDir "..\..\..")
+$repoRoot  = (& git -C $scriptDir rev-parse --show-toplevel) 2>$null
+if (-not $repoRoot) {
+  # Fallback: walk up looking for .git directory (works outside git too).
+  $candidate = $scriptDir
+  while ($candidate -and -not (Test-Path (Join-Path $candidate ".git"))) {
+    $parent = Split-Path -Parent $candidate
+    if ($parent -eq $candidate) { break }
+    $candidate = $parent
+  }
+  $repoRoot = $candidate
+}
 Set-Location $repoRoot
 
 $results = New-Object System.Collections.Generic.List[object]
@@ -215,16 +227,26 @@ Add-Result 11 "Orphan folder openspec/changes/revamp-readme/ does not exist" $pa
 # ----------------------------------------------------------------------
 # 12. Out-of-scope guard: git diff HEAD only touches allowed paths
 # ----------------------------------------------------------------------
-$diffRaw = (& git diff --name-only HEAD) 2>&1
+# Note: drop strict error handling around git so benign LF/CRLF stderr lines
+# (Windows autocrlf) do not abort the script via NativeCommandError. Only
+# stdout matters for the name-only diff.
+$savedEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$diffRaw = & git diff --name-only HEAD 2>$null
+$gitExit = $LASTEXITCODE
+$ErrorActionPreference = $savedEAP
 $changedFiles = @()
-if ($LASTEXITCODE -eq 0) {
-  $changedFiles = $diffRaw | Where-Object { $_ -and $_.Trim() -ne "" }
+if ($gitExit -eq 0 -and $diffRaw) {
+  $changedFiles = @($diffRaw) | Where-Object { $_ -and $_.Trim() -ne "" }
 }
 $allowedPatterns = @(
   '^README\.md$',
   '^docs/adaptive-thinking\.md$',
   '^openspec/changes/revamp-readme-md/.*$',
-  '^openspec/changes/revamp-readme(/|$)'  # the deleted orphan path
+  '^openspec/changes/revamp-readme(/|$)',  # the deleted orphan path
+  # Post-archive: change folder moved under archive/, capability spec published.
+  '^openspec/changes/archive/[0-9]{4}-[0-9]{2}-[0-9]{2}-revamp-readme-md/.*$',
+  '^openspec/specs/project-readme/.*$'
 )
 $disallowed = @()
 foreach ($f in $changedFiles) {
