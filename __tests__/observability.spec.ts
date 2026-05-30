@@ -1,9 +1,12 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Project root — one level up from __tests__/
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath converts file:// URL to a native OS path (needed on Windows
+// where .pathname produces /C:/... which uv_spawn cannot resolve as cwd).
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const LOGS_DIR = join(ROOT, "logs");
 const DB_PATH = join(LOGS_DIR, "telemetry.db");
 
