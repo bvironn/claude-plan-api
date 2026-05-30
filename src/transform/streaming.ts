@@ -4,7 +4,18 @@ import { updateRequest } from "../observability/storage.ts";
 import { currentTrace } from "../observability/tracer.ts";
 
 const MAX_RESPONSE_BODY = 5 * 1024 * 1024; // 5 MB
-const PENDING_CANCEL_TIMEOUT_MS = 30_000;
+const DEFAULT_PENDING_CANCEL_TIMEOUT_MS = 30_000;
+// Hard ceiling for the deferred-cancel grace window. Resolved LAZILY (per
+// stream creation) rather than at module load so the env override is robust to
+// test import order — a module-load read would be frozen to whatever value was
+// set the first time ANY spec imported this file. Overridable via env so tests
+// can exercise the stalled-upstream force-close path with a tiny budget (a
+// permanently hung read can't be advanced by virtual-time tricks).
+function resolvePendingCancelTimeoutMs(): number {
+  const raw = process.env.PENDING_CANCEL_TIMEOUT_MS;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PENDING_CANCEL_TIMEOUT_MS;
+}
 // SSE keep-alive heartbeat. When Anthropic is "thinking" between chunks,
 // long tool_use inputs can produce gaps > 10s, during which TCP middleboxes
 // (Tailscale, NAT, OpenCode's HTTP client) may time out and drop the
@@ -15,6 +26,10 @@ const KEEP_ALIVE_INTERVAL_MS = 5_000;
 const KEEP_ALIVE_COMMENT = ": keep-alive\n\n";
 
 export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string, toolMap?: ToolMap): ReadableStream {
+  // Resolve the grace-window ceiling once per stream (not at module load) so an
+  // env override applied before this call is always honored regardless of which
+  // spec imported the module first.
+  const pendingCancelTimeoutMs = resolvePendingCancelTimeoutMs();
   const decoder = new TextDecoder();
   let buffer = "";
   let msgId = `chatcmpl-${Date.now()}`;
@@ -41,6 +56,18 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   let pendingCancel = false;
   let pendingCancelReason: string | null = null;
   let pendingCancelAt: number | null = null;
+  // Force-close timer armed by the deferred cancel() path. Without it, a
+  // permanently-stalled upstream (the reader never resolves again) would never
+  // hit the in-loop budget check, leaving the keepalive firing into a dead
+  // client forever (issue #5). Cleared on natural tool_use close, in finally,
+  // and guarded against double-arming.
+  let pendingCancelTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearPendingCancelTimer = () => {
+    if (pendingCancelTimer !== null) {
+      clearTimeout(pendingCancelTimer);
+      pendingCancelTimer = null;
+    }
+  };
 
   // Thinking-passthrough state: for each active `thinking` or `redacted_thinking`
   // content block, track the running plaintext + signature (or opaque ciphertext
@@ -185,7 +212,8 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
       try {
         outer: while (!closed) {
           // Timeout safeguard for deferred cancel
-          if (pendingCancel && pendingCancelAt !== null && Date.now() - pendingCancelAt > PENDING_CANCEL_TIMEOUT_MS) {
+          if (pendingCancel && pendingCancelAt !== null && Date.now() - pendingCancelAt > pendingCancelTimeoutMs) {
+            clearPendingCancelTimer();
             emit("info", "stream.client_disconnect_timeout", { model, reason: pendingCancelReason, inToolUse });
             closed = true;
             reader?.cancel().catch(() => {});
@@ -213,6 +241,9 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
             // After each event: if a deferred cancel is pending and the tool_use block just closed,
             // force-close now — we captured the full JSON for telemetry.
             if (pendingCancel && !inToolUse) {
+              // Tool_use closed naturally inside the grace window — cancel the
+              // armed force-timer so it can't fire after we've already closed.
+              clearPendingCancelTimer();
               emit("info", "stream.client_disconnect_completed", { model, toolUseCompleted: true, reason: pendingCancelReason });
               closed = true;
               reader?.cancel().catch(() => {});
@@ -270,6 +301,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
           clearInterval(keepAliveInterval);
           keepAliveInterval = null;
         }
+        clearPendingCancelTimer();
         const traceId = traceAtStart?.traceId;
         if (traceId) {
           const truncated = accumulatedResponse.slice(0, MAX_RESPONSE_BODY);
@@ -287,10 +319,29 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
     },
     async cancel(reason) {
       if (inToolUse) {
+        // Guard against a second cancel() re-arming the timer.
+        if (pendingCancel) return;
         pendingCancel = true;
         pendingCancelReason = String(reason);
         pendingCancelAt = Date.now();
         emit("info", "stream.client_disconnect_deferred", { model, reason: String(reason), inToolUse: true });
+        // Schedule a force-close. The in-loop budget check only fires AFTER a
+        // read resolves; if the upstream stalls permanently that check is never
+        // reached. This timer enforces the ceiling regardless: it cancels the
+        // upstream reader and stops the keepalive even when no further bytes
+        // ever arrive. The happy path (tool_use closes naturally) clears it.
+        clearPendingCancelTimer();
+        pendingCancelTimer = setTimeout(() => {
+          pendingCancelTimer = null;
+          if (closed) return;
+          emit("info", "stream.client_disconnect_timeout", { model, reason: pendingCancelReason, inToolUse });
+          closed = true;
+          if (keepAliveInterval) {
+            clearInterval(keepAliveInterval);
+            keepAliveInterval = null;
+          }
+          reader?.cancel().catch(() => {});
+        }, pendingCancelTimeoutMs);
         return;
       }
       closed = true;
@@ -298,6 +349,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
         clearInterval(keepAliveInterval);
         keepAliveInterval = null;
       }
+      clearPendingCancelTimer();
       emit("info", "stream.client_disconnect", { model, reason: String(reason) });
       try { await reader?.cancel(); } catch {}
     },
