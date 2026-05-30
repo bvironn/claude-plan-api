@@ -19,7 +19,7 @@ beforeAll(async () => {
   // clean logs & db for a clean test run
   await Bun.$`rm -rf ${LOGS_DIR}`.nothrow();
 
-  serverProc = Bun.spawn(["bun", "src/index.ts", String(PORT)], {
+  serverProc = Bun.spawn([process.execPath, "src/index.ts", String(PORT)], {
     stdout: "pipe",
     stderr: "pipe",
     cwd: ROOT,
