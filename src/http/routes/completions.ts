@@ -203,7 +203,7 @@ export async function handleCompletions(req: Request): Promise<Response> {
   if (typeof body.temperature === "number") chatBody.temperature = body.temperature;
   if (body.stop !== undefined) chatBody.stop = body.stop;
 
-  const { body: anthropicBody, isStructuredOutput } = openaiToAnthropic(chatBody);
+  const { body: anthropicBody, isStructuredOutput, toolMap } = openaiToAnthropic(chatBody);
   const resolvedModel = anthropicBody.model as string;
 
   emit("debug", "completions.request", { model: resolvedModel, isStream });
@@ -221,7 +221,7 @@ export async function handleCompletions(req: Request): Promise<Response> {
 
   // --- Streaming path ---
   if (isStream) {
-    const chatStream = streamAnthropicToOpenai(res.body!, resolvedModel);
+    const chatStream = streamAnthropicToOpenai(res.body!, resolvedModel, toolMap);
     const textStream = chatChunkToTextChunkStream(chatStream, resolvedModel);
     return new Response(textStream, {
       headers: {
@@ -234,7 +234,7 @@ export async function handleCompletions(req: Request): Promise<Response> {
 
   // --- Non-streaming path ---
   const data = (await res.json()) as Record<string, unknown>;
-  const chatResponse = anthropicToOpenai(data, resolvedModel);
+  const chatResponse = anthropicToOpenai(data, resolvedModel, toolMap);
   const textResponse = reshapeToTextCompletion(chatResponse, resolvedModel);
 
   return Response.json(textResponse);

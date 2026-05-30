@@ -41,12 +41,35 @@ const CC_ALIASES: Record<string, string> = {
   askuserquestion: "AskUserQuestion",
 };
 
-let toolMap: Record<string, string> = {};
-let toolMapReverse: Record<string, string> = {};
+/**
+ * Request-scoped tool-name mapping state.
+ *
+ * The forward map (`forward`) translates a client tool name → the Anthropic
+ * wire name; the reverse map (`reverse`) translates the wire name back to the
+ * original client name. These MUST be per-request: `mapToolName` runs while
+ * building the upstream request, but `unmapToolName` runs LATER, mid-stream,
+ * when the upstream response arrives. A module-global map would let a second
+ * concurrent request clobber the first request's reverse lookup (issue #1).
+ */
+export interface ToolMap {
+  forward: Record<string, string>;
+  reverse: Record<string, string>;
+}
 
+/** Create a fresh, isolated per-request tool map. */
+export function createToolMap(): ToolMap {
+  return { forward: {}, reverse: {} };
+}
+
+// Module-level default map. Used ONLY when a caller does not pass an explicit
+// per-request map (e.g. unit tests, or any legacy single-request path). The
+// production request pipeline always passes a request-scoped map, so this
+// default never participates in concurrent requests.
+let defaultMap: ToolMap = createToolMap();
+
+/** Reset the module-level default map. No effect on request-scoped maps. */
 export function resetDynamicMap() {
-  toolMap = {};
-  toolMapReverse = {};
+  defaultMap = createToolMap();
 }
 
 export function sanitizeToolName(name: string): string {
@@ -83,9 +106,10 @@ function ccCanonical(name: string): string | null {
 // thinking. We MUST match this shape.
 const MCP_PREFIX = "mcp_";
 
-export function mapToolName(name: string): string {
-  if (toolMap[name]) return toolMap[name];
-  if (toolMapReverse[name]) return name;
+export function mapToolName(name: string, map?: ToolMap): string {
+  map ??= defaultMap;
+  if (map.forward[name]) return map.forward[name];
+  if (map.reverse[name]) return name;
 
   const canonical = ccCanonical(name);
   const base = canonical ?? sanitizeToolName(name);
@@ -100,19 +124,20 @@ export function mapToolName(name: string): string {
   const cased = naked.length > 0 ? naked[0]!.toUpperCase() + naked.slice(1) : naked;
   const prefixed = `${MCP_PREFIX}${cased}`;
 
-  const used = new Set(Object.values(toolMap));
+  const used = new Set(Object.values(map.forward));
   let mapped = prefixed;
   let suffix = 2;
   while (used.has(mapped)) mapped = `${prefixed}_${suffix++}`;
 
-  toolMap[name] = mapped;
-  toolMapReverse[mapped] = name;
+  map.forward[name] = mapped;
+  map.reverse[mapped] = name;
   emit("debug", "tool.map", { original: name, mapped, canonical: canonical !== null });
   return mapped;
 }
 
-export function unmapToolName(name: string): string {
-  if (toolMapReverse[name]) return toolMapReverse[name];
+export function unmapToolName(name: string, map?: ToolMap): string {
+  map ??= defaultMap;
+  if (map.reverse[name]) return map.reverse[name];
   // Fallback: if the response carries a prefixed name we never mapped
   // (e.g. tool called in a follow-up turn whose state was lost), strip the
   // prefix to give the client its original name back.

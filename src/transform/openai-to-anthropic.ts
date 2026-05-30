@@ -1,5 +1,5 @@
 import type { AnthropicMessage } from "../types.ts";
-import { resetDynamicMap, mapToolName } from "../domain/tool-mapping.ts";
+import { createToolMap, mapToolName, type ToolMap } from "../domain/tool-mapping.ts";
 import {
   resolveModelVariant,
   getModelCapabilities,
@@ -121,6 +121,11 @@ export const CONTEXT_PREAMBLE = "";
 export interface TransformResult {
   body: Record<string, unknown>;
   isStructuredOutput: boolean;
+  // Request-scoped tool-name map built during this transform. Callers MUST
+  // thread this into the response transforms (`streamAnthropicToOpenai` /
+  // `anthropicToOpenai`) so `unmapToolName` reverses names against THIS
+  // request's map, never a shared module global (issue #1).
+  toolMap: ToolMap;
 }
 
 /**
@@ -340,7 +345,10 @@ export function sanitizeOpenAIMessages(
 }
 
 export function openaiToAnthropic(body: Record<string, unknown>): TransformResult {
-  resetDynamicMap();
+  // Per-request tool map. Built here, returned in TransformResult, and threaded
+  // into the response transforms so the reverse lookup is never clobbered by a
+  // concurrent request (issue #1).
+  const toolMap = createToolMap();
   const { id: model, effort: suffixEffort } = resolveModelVariant(
     (body.model as string) || "sonnet",
   );
@@ -402,7 +410,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
         const fn = tc.function as Record<string, unknown>;
         let input = {};
         try { input = typeof fn.arguments === "string" ? JSON.parse(fn.arguments as string) : fn.arguments || {}; } catch {}
-        content.push({ type: "tool_use", id: tc.id, name: mapToolName(fn.name as string), input });
+        content.push({ type: "tool_use", id: tc.id, name: mapToolName(fn.name as string, toolMap), input });
       }
       messages.push({ role: "assistant", content });
     } else if (msg.role === "tool") {
@@ -661,7 +669,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     result.tools = (body.tools as Array<Record<string, unknown>>).map((t) => {
       const fn = t.function as Record<string, unknown>;
       return {
-        name: mapToolName(fn.name as string),
+        name: mapToolName(fn.name as string, toolMap),
         description: (fn.description as string) || "",
         input_schema: fn.parameters || { type: "object", properties: {} },
       };
@@ -685,7 +693,7 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     isHaiku,
   });
 
-  return { body: result, isStructuredOutput };
+  return { body: result, isStructuredOutput, toolMap };
 }
 
 function addCacheControlToLastUserBlock(messages: AnthropicMessage[]): void {

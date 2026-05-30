@@ -1,4 +1,4 @@
-import { unmapToolName } from "../domain/tool-mapping.ts";
+import { unmapToolName, type ToolMap } from "../domain/tool-mapping.ts";
 import { emit } from "../observability/logger.ts";
 import { updateRequest } from "../observability/storage.ts";
 import { currentTrace } from "../observability/tracer.ts";
@@ -14,7 +14,7 @@ const PENDING_CANCEL_TIMEOUT_MS = 30_000;
 const KEEP_ALIVE_INTERVAL_MS = 5_000;
 const KEEP_ALIVE_COMMENT = ": keep-alive\n\n";
 
-export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string): ReadableStream {
+export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string, toolMap?: ToolMap): ReadableStream {
   const decoder = new TextDecoder();
   let buffer = "";
   let msgId = `chatcmpl-${Date.now()}`;
@@ -106,7 +106,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
               toolIndex++;
               inToolUse = true;
               toolUseBlockIndex = typeof event.index === "number" ? event.index : null;
-              const name = unmapToolName(cb!.name as string);
+              const name = unmapToolName(cb!.name as string, toolMap);
               if (!safeEnqueue(controller, chunk({
                 id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
                 choices: [{ index: 0, delta: { ...(sentRole ? {} : { role: "assistant" }), tool_calls: [{ index: toolIndex, id: cb!.id, type: "function", function: { name, arguments: "" } }] }, finish_reason: null }],

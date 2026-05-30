@@ -1,7 +1,7 @@
-import { unmapToolName } from "../domain/tool-mapping.ts";
+import { unmapToolName, type ToolMap } from "../domain/tool-mapping.ts";
 import { emit } from "../observability/logger.ts";
 
-export function anthropicToOpenai(res: Record<string, unknown>, model: string): Record<string, unknown> {
+export function anthropicToOpenai(res: Record<string, unknown>, model: string, toolMap?: ToolMap): Record<string, unknown> {
   // No deobfuscation needed - Anthropic responds in plain text
   const content = (res.content as Array<Record<string, unknown>>) || [];
   const textBlock = content.find((c) => c.type === "text");
@@ -32,7 +32,7 @@ export function anthropicToOpenai(res: Record<string, unknown>, model: string): 
     message.tool_calls = toolBlocks.map((tu) => ({
       id: tu.id,
       type: "function",
-      function: { name: unmapToolName(tu.name as string), arguments: JSON.stringify(tu.input) },
+      function: { name: unmapToolName(tu.name as string, toolMap), arguments: JSON.stringify(tu.input) },
     }));
   }
   const usage = res.usage as Record<string, number> || {};
