@@ -70,7 +70,8 @@ Event model and SQLite schema: [`OBSERVABILITY.md`](./OBSERVABILITY.md).
 | `GET /health` | platform | liveness |
 | `GET /v1/models` | OpenAI-compat | upstream catalog with derived effort variants |
 | `POST /v1/chat/completions` | OpenAI-compat | streaming and non-streaming chat |
-| `POST /v1/tokens/count` | OpenAI-compat | token count for a message set |
+| `POST /v1/completions` | OpenAI-compat | FIM / legacy completion |
+| `POST /v1/tokens/count` | gateway | token count for a message set |
 | `GET /api/account/profile` | gateway | cached OAuth profile |
 | `GET /api/telemetry/requests` | telemetry | recorded requests, filterable |
 | `GET /api/telemetry/requests/:traceId` | telemetry | single request with body and SSE events |
@@ -125,8 +126,8 @@ cosplay, so this one has it.
                        └──────────┘
 ```
 
-Backend (`src/`) is a Bun native HTTP server. Stateless apart from the SQLite
-event store and an in-memory credential cache.
+Backend (`src/`) is a Bun native HTTP server. Durable storage is just the
+SQLite event store; everything else in memory is rebuildable cache.
 
 | Path | Concern |
 | --- | --- |
@@ -134,6 +135,7 @@ event store and an in-memory credential cache.
 | `src/transform/` | OpenAI ↔ Anthropic translation (request and response) |
 | `src/upstream/` | Anthropic client, headers, billing, count-tokens |
 | `src/observability/` | event bus, SQLite store, tracer, logger |
+| `src/guards/` | request-shape guards — anti-loop |
 | `src/domain/` | account, credentials, models, tool-mapping |
 | `src/ui/` | Vite + React 19 SPA — separate sub-project |
 
@@ -225,7 +227,7 @@ doing on a Claude Max subscription, today.
 | [`CLAUDE.md`](./CLAUDE.md) | agent conventions for this codebase (Bun-first rules) |
 | [`docs/adaptive-thinking.md`](./docs/adaptive-thinking.md) | the long version of §Adaptive thinking |
 | [`docs/audit-2026-04-17.md`](./docs/audit-2026-04-17.md) | a snapshot audit of the gateway behaviour |
-| [`openspec/`](./openspec/) | spec-driven change history and active proposals |
+| [`openspec/`](./openspec/) | spec-driven change history |
 
 ## License
 
