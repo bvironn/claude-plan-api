@@ -375,7 +375,29 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${text}` : text;
     } else if (msg.role === "assistant" && msg.tool_calls) {
       const content: Array<Record<string, unknown>> = [];
-      if (msg.content) content.push({ type: "text", text: msg.content });
+      // Only emit a text block when there is REAL text. Anthropic rejects a
+      // text block whose `text` is not a non-empty string (HTTP 400: "Input
+      // should be a valid string with at least 1 character"). sanitizeOpenAI
+      // Messages normalizes assistant `content: null` (with tool_calls) to an
+      // empty array `[]`, which is truthy — the old `if (msg.content)` check
+      // wrapped it as `{ type: "text", text: [] }` and triggered that 400.
+      //   - non-empty string → single text block.
+      //   - non-empty array  → translate vision/content blocks and spread them
+      //     (mirrors the user-message branch below), dropping empty text.
+      //   - empty string / empty array / null / undefined → push NOTHING.
+      if (typeof msg.content === "string" && msg.content.length > 0) {
+        content.push({ type: "text", text: msg.content });
+      } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+        const blocks = toAnthropicContentBlocks(
+          msg.content as Array<Record<string, unknown>>,
+        );
+        for (const block of blocks) {
+          if (block.type === "text" && (typeof block.text !== "string" || block.text.length === 0)) {
+            continue;
+          }
+          content.push(block);
+        }
+      }
       for (const tc of msg.tool_calls as Array<Record<string, unknown>>) {
         const fn = tc.function as Record<string, unknown>;
         let input = {};
