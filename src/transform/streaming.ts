@@ -47,6 +47,12 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
 
   let closed = false;
   let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  // Set true once the reader has been released/cancelled or the upstream closed
+  // cleanly. The deferred force-cancel timer checks this so it NEVER calls
+  // reader.cancel() on an already-released reader: clearTimeout cannot un-queue
+  // a callback that is already about to run, so this flag is the real guard
+  // against double-cancelling a released reader (issue #5).
+  let readerReleased = false;
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
   // Defer-cancel state: if client cancels mid tool_use, keep consuming upstream
@@ -222,7 +228,7 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
 
           if (!reader) break;
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) { readerReleased = true; break; }
           const raw = decoder.decode(value, { stream: true });
           buffer += raw;
 
@@ -297,6 +303,10 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
           try { controller.error(err); } catch {}
         }
       } finally {
+        // The consume loop has fully exited — the reader is no longer being
+        // read and is treated as released. Mark it so any deferred force-cancel
+        // that already slipped onto the event loop becomes a no-op.
+        readerReleased = true;
         if (keepAliveInterval) {
           clearInterval(keepAliveInterval);
           keepAliveInterval = null;
@@ -333,9 +343,16 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
         clearPendingCancelTimer();
         pendingCancelTimer = setTimeout(() => {
           pendingCancelTimer = null;
-          if (closed) return;
+          // Guard: if the stream already closed OR the reader was already
+          // released (clean upstream close / finally cleanup / a prior cancel),
+          // this deferred force-cancel is a no-op so we never call cancel() on
+          // an already-released reader. `clearTimeout` cannot un-queue a
+          // callback that is already about to run, so this flag check — not the
+          // timer clear alone — is what makes the released-reader case safe.
+          if (closed || readerReleased) return;
           emit("info", "stream.client_disconnect_timeout", { model, reason: pendingCancelReason, inToolUse });
           closed = true;
+          readerReleased = true;
           if (keepAliveInterval) {
             clearInterval(keepAliveInterval);
             keepAliveInterval = null;
