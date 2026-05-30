@@ -1,14 +1,18 @@
 import { subscribe } from "../../../observability/event-bus.ts";
 import { withObservability } from "../../../observability/middleware.ts";
 
-async function _handleTelemetryStream(_req: Request): Promise<Response> {
+export async function _handleTelemetryStreamForTest(_req: Request): Promise<Response> {
   const encoder = new TextEncoder();
+
+  // Hoisted so cancel() can reference them directly without relying on `this`
+  let unsubscribe: (() => void) | undefined;
+  let keepalive: ReturnType<typeof setInterval> | undefined;
 
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(encoder.encode(": connected\nretry: 3000\n\n"));
 
-      const unsubscribe = subscribe((evt) => {
+      unsubscribe = subscribe((evt) => {
         try {
           controller.enqueue(
             encoder.encode(`event: telemetry\ndata: ${JSON.stringify(evt)}\n\n`)
@@ -18,20 +22,15 @@ async function _handleTelemetryStream(_req: Request): Promise<Response> {
         }
       });
 
-      const keepalive = setInterval(() => {
+      keepalive = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": keepalive\n\n"));
         } catch {}
       }, 15_000);
-
-      (controller as unknown as Record<string, unknown>)._cleanup = () => {
-        unsubscribe();
-        clearInterval(keepalive);
-      };
     },
     cancel() {
-      const self = this as unknown as Record<string, unknown>;
-      (self._cleanup as (() => void) | undefined)?.();
+      unsubscribe?.();
+      if (keepalive !== undefined) clearInterval(keepalive);
     },
   });
 
@@ -47,4 +46,4 @@ async function _handleTelemetryStream(_req: Request): Promise<Response> {
   });
 }
 
-export const handleTelemetryStream = withObservability(_handleTelemetryStream);
+export const handleTelemetryStream = withObservability(_handleTelemetryStreamForTest);

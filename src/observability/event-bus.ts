@@ -14,3 +14,8 @@ export function subscribe(s: Subscriber): () => void {
   subs.add(s);
   return () => subs.delete(s);
 }
+
+/** Test-only: returns the number of active subscribers. */
+export function subscriberCount(): number {
+  return subs.size;
+}
