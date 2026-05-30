@@ -626,4 +626,43 @@ describe("openaiToAnthropic integration with sanitize pre-pass", () => {
     expect(upstreamMessages.length).toBeGreaterThan(0);
     expect(findEmptyTextBlocks(upstreamMessages)).toEqual([]);
   });
+
+  test("assistant content:'' + tool_calls → NO text block, but tool_use SURVIVES in Anthropic body (#2)", () => {
+    // Issue #2: an assistant message with an EMPTY-STRING content plus tool_calls
+    // must (a) NOT emit any empty/placeholder text block (Anthropic 400s on a
+    // zero-length text block) and (b) STILL carry its tool_use block in the
+    // Anthropic body — dropping it would orphan the matching tool_result on the
+    // following turn and break the tool-call sequence. The previous coverage
+    // asserted only (a); this adds the missing (b).
+    const { body } = openaiToAnthropic({
+      model: "claude-sonnet-4-5",
+      messages: [
+        { role: "user", content: "run it" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "call_1", function: { name: "bash", arguments: '{"cmd":"ls"}' } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "file.txt" },
+      ],
+    });
+
+    const upstreamMessages = body.messages as Array<Record<string, unknown>>;
+    const assistant = upstreamMessages.find((m) => m.role === "assistant")!;
+    expect(assistant).toBeDefined();
+    const blocks = assistant.content as Array<Record<string, unknown>>;
+
+    // (a) No text block at all, and no empty text blocks anywhere upstream.
+    expect(blocks.filter((b) => b.type === "text")).toHaveLength(0);
+    expect(findEmptyTextBlocks(upstreamMessages)).toEqual([]);
+
+    // (b) NEW assertion — the tool_use block MUST survive, carrying the mapped
+    // wire name and the original tool-call id.
+    const toolUse = blocks.filter((b) => b.type === "tool_use");
+    expect(toolUse).toHaveLength(1);
+    expect(toolUse[0]!.id).toBe("call_1");
+    expect(toolUse[0]!.name).toBe("mcp_Bash");
+  });
 });
