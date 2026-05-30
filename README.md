@@ -188,6 +188,18 @@ Strict TDD for behavioural changes (see [`CLAUDE.md`](./CLAUDE.md)); `bun test` 
 | `CREDENTIALS_PATH` | path | `~/.claude/.credentials.json` | OAuth credentials source. |
 | `ANTHROPIC_CLI_VERSION` | string | `2.1.112` | CLI version reported in user-agent and billing header. MUST match an Anthropic-recognised Claude Code release; unrecognised versions trigger safety policies (including redacted thinking). |
 | `MAX_RETRY_AFTER_MS` | integer (ms) | `30000` | Upper bound on honoured upstream `retry-after`. Anthropic returns hour-scale values when a Max quota is exhausted; this cap prevents the proxy from hanging indefinitely. |
+| `CLAUDE_CODE_IDENTITY` | boolean | `false` | Inject the official `"You are Claude Code, Anthropic's official CLI for Claude."` identity block into `system[]`. **Off by default** (neutral voice — best for general chat UIs). Set `true` to make the model identify/behave as the Claude Code CLI. Does **not** affect the mandatory billing header. See the callout below. |
+
+> ### ⚠️ `CLAUDE_CODE_IDENTITY` — check this first if requests start failing
+>
+> Every upstream request carries up to two `system[]` blocks:
+>
+> 1. **`x-anthropic-billing-header`** — **always sent, non-negotiable.** Anthropic requires it on OAuth requests to account usage against your Max plan. The gateway has no mode that omits it; dropping it would `4xx` every call.
+> 2. **The identity block** `"You are Claude Code, Anthropic's official CLI for Claude."` — **optional, off by default**, controlled by this switch.
+>
+> **Why this matters for failures.** Anthropic's OAuth endpoint rejects *third-party* system prompts placed in `system[]` — e.g. a client sending `"You are OpenCode, a terminal assistant"`. This gateway already neutralizes that by relocating any client-supplied system prompt into the first `user` message, so it never reaches `system[]`. The **only** identity the gateway ever puts in `system[]` is the official Claude Code one above, and only when `CLAUDE_CODE_IDENTITY=true`.
+>
+> Leave it **off** for a clean, neutral assistant (the default). Flip it **on** only if you specifically want Claude-Code-flavored behavior. If you see unexplained `4xx` rebounds, the shape of `system[]` is the first place to look.
 
 ## Adaptive thinking — the short version
 

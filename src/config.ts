@@ -27,6 +27,23 @@ export const SALT = "59cf53e54c78";
 export const MAX_RETRIES = 3;
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 export const MAX_CONSECUTIVE_TOOL_ERRORS = 2;
+/**
+ * Inject the official Claude Code identity block — "You are Claude Code,
+ * Anthropic's official CLI for Claude." — into the upstream system[] array.
+ *
+ * OFF by default: the model answers with a neutral voice, which is what
+ * general chat UIs (OpenWebUI, LibreChat, etc.) want. Set CLAUDE_CODE_IDENTITY=true
+ * to make the model identify/behave as the Claude Code CLI.
+ *
+ * Read at CALL TIME (not import time) on purpose, so a per-request override and
+ * tests can flip it without re-importing the module.
+ *
+ * This does NOT control the mandatory x-anthropic-billing-header, which is
+ * ALWAYS sent — Anthropic requires it on OAuth requests for usage accounting.
+ */
+export function isClaudeCodeIdentityEnabled(): boolean {
+  return Bun.env.CLAUDE_CODE_IDENTITY === "true";
+}
 // Upper bound (ms) on how long we honour an upstream `retry-after` before
 // surfacing the error to the caller. Anthropic returns hour-scale values
 // when a Max subscription has exhausted its quota; without this cap the

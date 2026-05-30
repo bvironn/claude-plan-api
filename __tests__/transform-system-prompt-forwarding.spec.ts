@@ -42,6 +42,7 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
   test("REQ-2: system[] retains exactly billing + identity (no client prompt leaks in)", () => {
     const { body } = openaiToAnthropic({
       model: "sonnet",
+      clean_system: false,  // force identity ON so we can assert on 2-entry shape
       messages: [
         { role: "system", content: "LEAK-CANARY-CLIENT-PROMPT" },
         { role: "user", content: "hi" },
@@ -286,17 +287,31 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     }
   });
 
-  // --- REQ-10: clean_system=false (default) keeps the legacy 2-entry shape ---
-  test("REQ-10: omitting clean_system preserves the default identity entry", () => {
-    const { body } = openaiToAnthropic({
-      model: "sonnet",
-      messages: [{ role: "user", content: "hi" }],
-    });
-    const system = body.system as Block[];
-    expect(system).toHaveLength(2);
-    expect((system[1]!.text as string)).toBe(
-      "You are Claude Code, Anthropic's official CLI for Claude."
-    );
+  // --- REQ-10: omitting clean_system → identity OFF by default (global switch) ---
+  test("REQ-10: omitting clean_system → identity OFF by default (global switch)", () => {
+    // Ensure global flag is unset so we test the real default.
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      delete Bun.env.CLAUDE_CODE_IDENTITY;
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      // Default is OFF → only billing header, no identity entry.
+      expect(system).toHaveLength(1);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      // Confirm no "Claude Code" text appears anywhere in system[].
+      for (const entry of system) {
+        expect((entry.text as string).includes("Claude Code")).toBe(false);
+      }
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
   });
 
   // --- REQ-11: clean_system does NOT leak into the upstream body ---
@@ -350,11 +365,12 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
   test("REQ-13: runtime_system appears as a separate system[] entry after billing+identity", () => {
     const { body } = openaiToAnthropic({
       model: "sonnet",
+      clean_system: false,  // force identity ON to keep [billing, identity, runtime] ordering
       runtime_system: RUNTIME_TEXT,
       messages: [{ role: "user", content: "hi" }],
     });
     const system = body.system as Block[];
-    // Default (no clean_system) → billing, identity, runtime_system.
+    // clean_system:false → billing, identity, runtime_system.
     expect(system).toHaveLength(3);
     expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
     expect(system[1]!.text).toBe(
@@ -405,21 +421,33 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
     }
   });
 
-  // --- REQ-16: runtime_system + default (no clean_system) → system[] is
-  // exactly [billing, identity, runtime_system]. ---
-  test("REQ-16: runtime_system + default → [billing, identity, runtime_system] exactly", () => {
-    const { body } = openaiToAnthropic({
-      model: "sonnet",
-      runtime_system: RUNTIME_TEXT,
-      messages: [{ role: "user", content: "hi" }],
-    });
-    const system = body.system as Block[];
-    expect(system).toHaveLength(3);
-    expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
-    expect(system[1]!.text).toBe(
-      "You are Claude Code, Anthropic's official CLI for Claude."
-    );
-    expect(system[2]!.text).toBe(RUNTIME_TEXT);
+  // --- REQ-16: runtime_system + default (no clean_system, env unset) → system[]
+  // is exactly [billing, runtime_system] — identity is OFF by default. ---
+  test("REQ-16: runtime_system + default (env unset) → [billing, runtime_system], no identity", () => {
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      delete Bun.env.CLAUDE_CODE_IDENTITY;
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        runtime_system: RUNTIME_TEXT,
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      // Default OFF → [billing, runtime_system], no identity.
+      expect(system).toHaveLength(2);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      expect(system[1]!.text).toBe(RUNTIME_TEXT);
+      // No "Claude Code" anywhere.
+      for (const entry of system) {
+        expect((entry.text as string).includes("Claude Code")).toBe(false);
+      }
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
   });
 
   // --- REQ-17: runtime_system key is NOT forwarded to the upstream body. ---
@@ -434,38 +462,159 @@ describe("openaiToAnthropic — client system prompt forwarding", () => {
 
   // --- REQ-18: non-string runtime_system is ignored (no throw, no inject). ---
   test("REQ-18: non-string runtime_system is ignored — no throw, no injection", () => {
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
     let result: ReturnType<typeof openaiToAnthropic>;
-    expect(() => {
-      result = openaiToAnthropic({
-        model: "sonnet",
-        runtime_system: { not: "a string" } as unknown as string,
-        messages: [{ role: "user", content: "hi" }],
-      });
-    }).not.toThrow();
-    const system = result!.body.system as Block[];
-    // Same as if runtime_system were absent: billing + identity, length 2.
-    expect(system).toHaveLength(2);
-    expect((system[1]!.text as string)).toBe(
-      "You are Claude Code, Anthropic's official CLI for Claude."
-    );
-    // And nothing object-shaped or stringified leaks into the entries.
-    for (const entry of system) {
-      expect((entry.text as string).includes("not")).toBe(false);
+    try {
+      delete Bun.env.CLAUDE_CODE_IDENTITY;
+      expect(() => {
+        result = openaiToAnthropic({
+          model: "sonnet",
+          runtime_system: { not: "a string" } as unknown as string,
+          messages: [{ role: "user", content: "hi" }],
+        });
+      }).not.toThrow();
+      const system = result!.body.system as Block[];
+      // Default OFF + malformed runtime_system → billing only, length 1.
+      expect(system).toHaveLength(1);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      // No "Claude Code" text anywhere.
+      for (const entry of system) {
+        expect((entry.text as string).includes("Claude Code")).toBe(false);
+      }
+      // Nothing object-shaped or stringified leaks in.
+      for (const entry of system) {
+        expect((entry.text as string).includes("not")).toBe(false);
+      }
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
     }
   });
 
   // --- REQ-19: over-length runtime_system is truncated to 8000 chars. ---
   test("REQ-19: runtime_system longer than 8000 chars is truncated to 8000", () => {
-    const overlong = "x".repeat(9000);
-    const { body } = openaiToAnthropic({
-      model: "sonnet",
-      runtime_system: overlong,
-      messages: [{ role: "user", content: "hi" }],
-    });
-    const system = body.system as Block[];
-    expect(system).toHaveLength(3);
-    const injected = system[2]!.text as string;
-    expect(injected.length).toBe(8000);
-    expect(injected).toBe("x".repeat(8000));
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      delete Bun.env.CLAUDE_CODE_IDENTITY;
+      const overlong = "x".repeat(9000);
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        runtime_system: overlong,
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      // Default OFF + runtime_system → [billing, runtime_system], length 2.
+      expect(system).toHaveLength(2);
+      const injected = system[1]!.text as string;
+      expect(injected.length).toBe(8000);
+      expect(injected).toBe("x".repeat(8000));
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
+  });
+
+  // ===========================================================================
+  // CLAUDE_CODE_IDENTITY precedence matrix (new global switch tests)
+  // ===========================================================================
+
+  // --- Default OFF (no env, no clean_system) ---
+  test("default (no clean_system, env unset) → identity OFF, system is billing-only", () => {
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      delete Bun.env.CLAUDE_CODE_IDENTITY;
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      expect(system).toHaveLength(1);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      for (const entry of system) {
+        expect((entry.text as string).includes("Claude Code")).toBe(false);
+      }
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
+  });
+
+  // --- Global env ON + no clean_system → identity present ---
+  test("global CLAUDE_CODE_IDENTITY=true + no clean_system → identity present (length 2)", () => {
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      Bun.env.CLAUDE_CODE_IDENTITY = "true";
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      expect(system).toHaveLength(2);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      expect(system[1]!.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
+  });
+
+  // --- clean_system:false forces identity ON even when global default is off ---
+  test("clean_system:false forces identity ON even when global default is off", () => {
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      delete Bun.env.CLAUDE_CODE_IDENTITY;
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        clean_system: false,
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      expect(system).toHaveLength(2);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      expect(system[1]!.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
+  });
+
+  // --- clean_system:true forces identity OFF even when global default is on ---
+  test("clean_system:true forces identity OFF even when global default is on", () => {
+    const prev = Bun.env.CLAUDE_CODE_IDENTITY;
+    try {
+      Bun.env.CLAUDE_CODE_IDENTITY = "true";
+      const { body } = openaiToAnthropic({
+        model: "sonnet",
+        clean_system: true,
+        messages: [{ role: "user", content: "hi" }],
+      });
+      const system = body.system as Block[];
+      expect(system).toHaveLength(1);
+      expect((system[0]!.text as string).startsWith("x-anthropic-billing-header:")).toBe(true);
+      for (const entry of system) {
+        expect((entry.text as string).includes("Claude Code")).toBe(false);
+      }
+    } finally {
+      if (prev === undefined) {
+        delete Bun.env.CLAUDE_CODE_IDENTITY;
+      } else {
+        Bun.env.CLAUDE_CODE_IDENTITY = prev;
+      }
+    }
   });
 });

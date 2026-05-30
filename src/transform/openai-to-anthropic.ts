@@ -10,6 +10,7 @@ import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
 import { emit } from "../observability/logger.ts";
 import { repairToolPairs } from "./repair-tool-pairs.ts";
+import { isClaudeCodeIdentityEnabled } from "../config.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -449,24 +450,25 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     }
   }
 
-  // System array matches the plugin's final shape: billing header (no
-  // cache_control) + identity (cache_control WITHOUT `scope: "global"`).
-  // The plugin preserves cache_control from the incoming identity entry
-  // when present; we construct it fresh here because our request pipeline
-  // builds system[] from scratch rather than editing an incoming one.
-  //
-  // Opt-out: `clean_system: true` in the request body keeps the billing
-  // header (Anthropic requires it on OAuth requests to compute usage)
-  // but DROPS the "You are Claude Code…" identity entry, so the model
-  // doesn't introduce itself as the CLI. Used by direct chat clients
-  // (e.g. claude-plan-chat) that want a neutral conversational voice.
-  // Default `false` preserves the OpenCode / plugin parity that
-  // everything else in the request pipeline assumes.
-  const cleanSystem = body.clean_system === true;
+  // Whether to inject the "You are Claude Code…" identity block.
+  // Precedence (highest first):
+  //   body.clean_system === true   → force OFF (drop identity)        [per-request opt-out]
+  //   body.clean_system === false  → force ON  (keep identity)        [per-request opt-in]
+  //   body.clean_system unset      → global default, isClaudeCodeIdentityEnabled()
+  //                                  (env CLAUDE_CODE_IDENTITY, default OFF)
+  // The billing header (system[0]) is ALWAYS present regardless of this flag —
+  // Anthropic requires it on OAuth requests for usage accounting.
+  const includeIdentity =
+    body.clean_system === true
+      ? false
+      : body.clean_system === false
+        ? true
+        : isClaudeCodeIdentityEnabled();
+
   const system: Array<Record<string, unknown>> = [
     { type: "text", text: computeBilling(firstText) },
   ];
-  if (!cleanSystem) {
+  if (includeIdentity) {
     system.push({
       type: "text",
       text: CLAUDE_CODE_IDENTITY,

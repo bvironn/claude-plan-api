@@ -208,6 +208,7 @@ describe("openaiToAnthropic — cache_control breakpoints (last user block + las
   test("system[1] identity still carries cache_control (no drift)", () => {
     const { body } = openaiToAnthropic({
       model: "sonnet",
+      clean_system: false,  // force identity ON so we can test cache_control on system[1]
       messages: [{ role: "user", content: "hi" }],
     });
 
@@ -223,6 +224,7 @@ describe("openaiToAnthropic — cache_control breakpoints (last user block + las
   test("realistic request (identity + last-user tool_results + 3 tools) → cache_control count is exactly 3 and ≤ 4", () => {
     const { body } = openaiToAnthropic({
       model: "sonnet",
+      clean_system: false,  // force identity ON so the identity cache_control anchor is present
       messages: [
         { role: "user", content: "start" },
         {
