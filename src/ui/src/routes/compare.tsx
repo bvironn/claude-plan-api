@@ -245,7 +245,7 @@ function CompareColumns({
       a.removeEventListener("scroll", onA)
       b.removeEventListener("scroll", onB)
     }
-  }, [scrollSync])
+  }, [scrollSync, queryA.data, queryB.data])
 
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
