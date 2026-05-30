@@ -608,6 +608,13 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   // UI can render a readable plaintext reasoning summary per request.
   if (!isStructuredOutput && caps.adaptiveThinking) {
     result.thinking = { type: "adaptive", display: "summarized" };
+    // Anthropic rejects `temperature` !== 1 (and any top_p/top_k) once
+    // adaptive/extended thinking is enabled. Clients such as the hermes
+    // vision tool send temperature: 0 for determinism; normalize to the
+    // only values the upstream accepts here instead of 400-ing the request.
+    result.temperature = 1;
+    delete result.top_p;
+    delete result.top_k;
   }
 
   // INTENTIONALLY OMITTED: context_management edits in the request body.
