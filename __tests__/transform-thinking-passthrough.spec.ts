@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { anthropicToOpenai } from "../src/transform/anthropic-to-openai.ts";
 import { streamAnthropicToOpenai } from "../src/transform/streaming.ts";
+import { createToolMap } from "../src/domain/tool-mapping.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirrors the style in transform-streaming-buffer-flush.spec.ts)
@@ -67,7 +68,7 @@ describe("anthropicToOpenai — thinking passthrough", () => {
       content: [{ type: "text", text: "plain answer" }],
       stop_reason: "end_turn",
       usage: { input_tokens: 10, output_tokens: 3 },
-    }, "claude-test");
+    }, "claude-test", createToolMap());
 
     const choices = out.choices as Array<{ message: Record<string, unknown> }>;
     const msg = choices[0]!.message;
@@ -85,7 +86,7 @@ describe("anthropicToOpenai — thinking passthrough", () => {
       ],
       stop_reason: "end_turn",
       usage: { input_tokens: 10, output_tokens: 3 },
-    }, "claude-test");
+    }, "claude-test", createToolMap());
 
     const msg = (out.choices as Array<{ message: Record<string, unknown> }>)[0]!.message;
     expect(msg.content).toBe("final answer");
@@ -105,7 +106,7 @@ describe("anthropicToOpenai — thinking passthrough", () => {
         { type: "text", text: "tail" },
       ],
       stop_reason: "end_turn",
-    }, "claude-test");
+    }, "claude-test", createToolMap());
 
     const msg = (out.choices as Array<{ message: Record<string, unknown> }>)[0]!.message;
     expect(msg.reasoning_content).toBe("A\n\nB");
@@ -124,7 +125,7 @@ describe("anthropicToOpenai — thinking passthrough", () => {
         { type: "text", text: "answer" },
       ],
       stop_reason: "end_turn",
-    }, "claude-test");
+    }, "claude-test", createToolMap());
 
     const msg = (out.choices as Array<{ message: Record<string, unknown> }>)[0]!.message;
     expect(msg.reasoning_content).toBe("visible"); // redacted is NOT appended
@@ -142,7 +143,7 @@ describe("anthropicToOpenai — thinking passthrough", () => {
         { type: "text", text: "answer" },
       ],
       stop_reason: "end_turn",
-    }, "claude-test");
+    }, "claude-test", createToolMap());
 
     const msg = (out.choices as Array<{ message: Record<string, unknown> }>)[0]!.message;
     expect(msg.reasoning_content).toBeUndefined();
@@ -169,7 +170,7 @@ describe("streamAnthropicToOpenai — thinking passthrough", () => {
       { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 9 } },
     ]);
 
-    const out = streamAnthropicToOpenai(upstream, "claude-stream-req6");
+    const out = streamAnthropicToOpenai(upstream, "claude-stream-req6", createToolMap());
     const chunks = await drainAll(out);
     const parsed = parseChatCompletionChunks(chunks);
     const d = deltas(parsed);
@@ -214,7 +215,7 @@ describe("streamAnthropicToOpenai — thinking passthrough", () => {
       { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
     ]);
 
-    const out = streamAnthropicToOpenai(upstream, "claude-stream-req7");
+    const out = streamAnthropicToOpenai(upstream, "claude-stream-req7", createToolMap());
     const chunks = await drainAll(out);
     const parsed = parseChatCompletionChunks(chunks);
     const d = deltas(parsed);
@@ -237,7 +238,7 @@ describe("streamAnthropicToOpenai — thinking passthrough", () => {
       { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
     ]);
 
-    const out = streamAnthropicToOpenai(upstream, "claude-stream-req8");
+    const out = streamAnthropicToOpenai(upstream, "claude-stream-req8", createToolMap());
     const chunks = await drainAll(out);
     const parsed = parseChatCompletionChunks(chunks);
     const d = deltas(parsed);
@@ -272,7 +273,7 @@ describe("streamAnthropicToOpenai — thinking passthrough", () => {
       { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
     ]);
 
-    const out = streamAnthropicToOpenai(upstream, "claude-stream-req9");
+    const out = streamAnthropicToOpenai(upstream, "claude-stream-req9", createToolMap());
     const chunks = await drainAll(out);
     const parsed = parseChatCompletionChunks(chunks);
     const d = deltas(parsed);

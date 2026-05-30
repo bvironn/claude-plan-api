@@ -1,7 +1,7 @@
 import { unmapToolName, type ToolMap } from "../domain/tool-mapping.ts";
 import { emit } from "../observability/logger.ts";
 
-export function anthropicToOpenai(res: Record<string, unknown>, model: string, toolMap?: ToolMap): Record<string, unknown> {
+export function anthropicToOpenai(res: Record<string, unknown>, model: string, toolMap: ToolMap): Record<string, unknown> {
   // No deobfuscation needed - Anthropic responds in plain text
   const content = (res.content as Array<Record<string, unknown>>) || [];
   const textBlock = content.find((c) => c.type === "text");

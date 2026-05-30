@@ -1,5 +1,6 @@
 import { describe, test, expect, spyOn, beforeAll, afterAll } from "bun:test";
 import * as logger from "../src/observability/logger.ts";
+import { createToolMap } from "../src/domain/tool-mapping.ts";
 
 // =============================================================================
 // Regression (#5): a deferred cancel on a STALLED upstream must still force-
@@ -134,7 +135,7 @@ describe("streamAnthropicToOpenai — deferred cancel on STALLED upstream (#5)",
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-stall");
+      const out = streamAnthropicToOpenai(upstream, "claude-stall", createToolMap());
       const { reader, chunks } = drainInBackground(out);
 
       // Let the state machine enter tool_use mode (start_0 + delta processed).

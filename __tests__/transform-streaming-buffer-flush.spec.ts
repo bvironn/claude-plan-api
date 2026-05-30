@@ -1,5 +1,6 @@
 import { describe, it, expect, spyOn } from "bun:test";
 import { streamAnthropicToOpenai } from "../src/transform/streaming.ts";
+import { createToolMap } from "../src/domain/tool-mapping.ts";
 import * as logger from "../src/observability/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -110,7 +111,7 @@ describe("streamAnthropicToOpenai — end-of-stream buffer flush", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-flush-req1");
+      const out = streamAnthropicToOpenai(upstream, "claude-flush-req1", createToolMap());
       const chunks = await drainAll(out);
       const parsed = parseChatCompletionChunks(chunks);
 
@@ -151,7 +152,7 @@ describe("streamAnthropicToOpenai — end-of-stream buffer flush", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-flush-req2");
+      const out = streamAnthropicToOpenai(upstream, "claude-flush-req2", createToolMap());
       const chunks = await drainAll(out);
       const parsed = parseChatCompletionChunks(chunks);
 
@@ -193,7 +194,7 @@ describe("streamAnthropicToOpenai — end-of-stream buffer flush", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-flush-req3");
+      const out = streamAnthropicToOpenai(upstream, "claude-flush-req3", createToolMap());
       // Must not throw
       const chunks = await drainAll(out);
 
@@ -235,7 +236,7 @@ describe("streamAnthropicToOpenai — end-of-stream buffer flush", () => {
 
     const upstream = buildBytesStream([chunk1, chunk2]);
 
-    const out = streamAnthropicToOpenai(upstream, "claude-flush-req4");
+    const out = streamAnthropicToOpenai(upstream, "claude-flush-req4", createToolMap());
     const chunks = await drainAll(out);
     const parsed = parseChatCompletionChunks(chunks);
 
@@ -278,7 +279,7 @@ describe("streamAnthropicToOpenai — end-of-stream buffer flush", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-flush-req5");
+      const out = streamAnthropicToOpenai(upstream, "claude-flush-req5", createToolMap());
       const reader = out.getReader();
       const chunks: string[] = [];
       const drainDone = (async () => {

@@ -4,6 +4,8 @@ import {
   mapToolName,
   unmapToolName,
 } from "../src/domain/tool-mapping.ts";
+import { openaiToAnthropic } from "../src/transform/openai-to-anthropic.ts";
+import { anthropicToOpenai } from "../src/transform/anthropic-to-openai.ts";
 
 // =============================================================================
 // Regression (#1): the dynamic tool map must be PER-REQUEST, not module-global.
@@ -73,5 +75,67 @@ describe("tool-mapping — per-request scoping (#1)", () => {
     const mapB = createToolMap();
     expect(mapToolName("bash", mapB)).toBe("mcp_Bash");
     expect(unmapToolName("mcp_Bash_2", mapB)).not.toBe("Bash");
+  });
+
+  // ===========================================================================
+  // End-to-end NON-STREAMING path (the chat.ts stream:false branch).
+  //
+  // This is the exact gap the earlier #1 fix left open: the non-streaming
+  // branch called `anthropicToOpenai(data, model)` with NO map, so it fell back
+  // to a module-global reverse map. Under concurrency, request B's
+  // openaiToAnthropic() repopulated that global between A's map-build and A's
+  // unmap, leaking B's names into A's response.
+  //
+  // Now both openaiToAnthropic() (forward) and anthropicToOpenai() (reverse)
+  // operate on the SAME request-scoped TransformResult.toolMap. The module
+  // global was removed entirely, so there is no shared state left to race.
+  // ===========================================================================
+  test("non-streaming: A's reverse map is not clobbered by B (full transform pipeline)", () => {
+    // ---- Request A enters chat.ts: openaiToAnthropic builds A's forward map.
+    const reqA = openaiToAnthropic({
+      model: "sonnet",
+      tools: [
+        { type: "function", function: { name: "search", description: "A", parameters: {} } },
+      ],
+    });
+    const wireA = (reqA.body.tools as Array<Record<string, unknown>>)[0]!.name as string;
+    expect(wireA).toBe("mcp_Search");
+
+    // ---- Request B starts concurrently and builds ITS OWN forward map for a
+    // DIFFERENT original that canonicalizes to the SAME wire name. With the old
+    // module-global design this is the exact moment that clobbered A's reverse
+    // entry for mcp_Search.
+    const reqB = openaiToAnthropic({
+      model: "sonnet",
+      tools: [
+        { type: "function", function: { name: "Search", description: "B", parameters: {} } },
+      ],
+    });
+    // B's "Search" canonicalizes to mcp_Search too; both requests share the
+    // wire name but each owns an independent reverse map.
+    const wireB = (reqB.body.tools as Array<Record<string, unknown>>)[0]!.name as string;
+    expect(wireB).toBe("mcp_Search");
+
+    // ---- A's NON-STREAMING response arrives LATER and is transformed with A's
+    // own toolMap (as chat.ts now does: anthropicToOpenai(data, model, toolMap)).
+    const responseA = {
+      content: [{ type: "tool_use", id: "call_a", name: wireA, input: { q: "x" } }],
+    };
+    const openaiA = anthropicToOpenai(responseA, "sonnet", reqA.toolMap);
+    const toolCallsA = (
+      (openaiA.choices as Array<Record<string, unknown>>)[0]!.message as Record<string, unknown>
+    ).tool_calls as Array<Record<string, unknown>>;
+    // MUST be A's original tool name ("search"), never clobbered to B's "Search".
+    expect((toolCallsA[0]!.function as Record<string, unknown>).name).toBe("search");
+
+    // ---- And B's response, transformed with B's map, resolves to B's original.
+    const responseB = {
+      content: [{ type: "tool_use", id: "call_b", name: wireB, input: {} }],
+    };
+    const openaiB = anthropicToOpenai(responseB, "sonnet", reqB.toolMap);
+    const toolCallsB = (
+      (openaiB.choices as Array<Record<string, unknown>>)[0]!.message as Record<string, unknown>
+    ).tool_calls as Array<Record<string, unknown>>;
+    expect((toolCallsB[0]!.function as Record<string, unknown>).name).toBe("Search");
   });
 });

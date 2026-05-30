@@ -1,5 +1,6 @@
 import { describe, test, expect, spyOn } from "bun:test";
 import { streamAnthropicToOpenai } from "../src/transform/streaming.ts";
+import { createToolMap } from "../src/domain/tool-mapping.ts";
 import * as logger from "../src/observability/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -149,7 +150,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-test");
+      const out = streamAnthropicToOpenai(upstream, "claude-test", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       // Let the start() loop begin and consume at least one event.
@@ -198,7 +199,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-defer");
+      const out = streamAnthropicToOpenai(upstream, "claude-defer", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       // Wait until the state machine has entered tool_use mode (start_0 processed).
@@ -276,7 +277,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-drop");
+      const out = streamAnthropicToOpenai(upstream, "claude-drop", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       await waitFor(() => emitCallsFor(emitSpy, "stream.start").length > 0);
@@ -316,7 +317,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-end-a");
+      const out = streamAnthropicToOpenai(upstream, "claude-end-a", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       await waitFor(() => emitCallsFor(emitSpy, "stream.start").length > 0);
@@ -353,7 +354,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-happy");
+      const out = streamAnthropicToOpenai(upstream, "claude-happy", createToolMap());
       const { done } = drainInBackground(out);
       await done;
 
@@ -400,7 +401,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-seq");
+      const out = streamAnthropicToOpenai(upstream, "claude-seq", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       await waitFor(() => emitCallsFor(emitSpy, "stream.start").length > 0);
@@ -450,7 +451,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-legacy");
+      const out = streamAnthropicToOpenai(upstream, "claude-legacy", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       await waitFor(() => emitCallsFor(emitSpy, "stream.start").length > 0);
@@ -492,7 +493,7 @@ describe("streamAnthropicToOpenai — defer cancel mid tool_use", () => {
 
     const emitSpy = spyOn(logger, "emit");
     try {
-      const out = streamAnthropicToOpenai(upstream, "claude-timeout");
+      const out = streamAnthropicToOpenai(upstream, "claude-timeout", createToolMap());
       const { reader, done } = drainInBackground(out);
 
       await waitFor(() => emitCallsFor(emitSpy, "stream.start").length > 0);

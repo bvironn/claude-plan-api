@@ -61,17 +61,6 @@ export function createToolMap(): ToolMap {
   return { forward: {}, reverse: {} };
 }
 
-// Module-level default map. Used ONLY when a caller does not pass an explicit
-// per-request map (e.g. unit tests, or any legacy single-request path). The
-// production request pipeline always passes a request-scoped map, so this
-// default never participates in concurrent requests.
-let defaultMap: ToolMap = createToolMap();
-
-/** Reset the module-level default map. No effect on request-scoped maps. */
-export function resetDynamicMap() {
-  defaultMap = createToolMap();
-}
-
 export function sanitizeToolName(name: string): string {
   // Anthropic tool names: [a-zA-Z0-9_], max 64 chars, must start with a letter
   let s = name.replace(/[^a-zA-Z0-9_]/g, "_");
@@ -106,8 +95,7 @@ function ccCanonical(name: string): string | null {
 // thinking. We MUST match this shape.
 const MCP_PREFIX = "mcp_";
 
-export function mapToolName(name: string, map?: ToolMap): string {
-  map ??= defaultMap;
+export function mapToolName(name: string, map: ToolMap): string {
   if (map.forward[name]) return map.forward[name];
   if (map.reverse[name]) return name;
 
@@ -135,8 +123,7 @@ export function mapToolName(name: string, map?: ToolMap): string {
   return mapped;
 }
 
-export function unmapToolName(name: string, map?: ToolMap): string {
-  map ??= defaultMap;
+export function unmapToolName(name: string, map: ToolMap): string {
   if (map.reverse[name]) return map.reverse[name];
   // Fallback: if the response carries a prefixed name we never mapped
   // (e.g. tool called in a follow-up turn whose state was lost), strip the

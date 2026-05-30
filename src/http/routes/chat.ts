@@ -65,7 +65,7 @@ export async function handleChat(req: Request): Promise<Response> {
   await ensureValidToken();
   await ensureAccountUuid();
 
-  const { body: anthropicBody, isStructuredOutput } = openaiToAnthropic(body);
+  const { body: anthropicBody, isStructuredOutput, toolMap } = openaiToAnthropic(body);
   const model = anthropicBody.model as string;
   const isStream = anthropicBody.stream as boolean;
 
@@ -93,13 +93,13 @@ export async function handleChat(req: Request): Promise<Response> {
   resetToolErrorCounter(sessionId);
 
   if (isStream) {
-    return new Response(streamAnthropicToOpenai(res.body!, model), {
+    return new Response(streamAnthropicToOpenai(res.body!, model, toolMap), {
       headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
     });
   }
 
   const data = await res.json() as Record<string, unknown>;
-  const openaiResponse = anthropicToOpenai(data, model);
+  const openaiResponse = anthropicToOpenai(data, model, toolMap);
 
   // Capture response body + token usage for non-streaming
   if (trace?.traceId) {

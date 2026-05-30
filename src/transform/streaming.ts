@@ -25,7 +25,7 @@ function resolvePendingCancelTimeoutMs(): number {
 const KEEP_ALIVE_INTERVAL_MS = 5_000;
 const KEEP_ALIVE_COMMENT = ": keep-alive\n\n";
 
-export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string, toolMap?: ToolMap): ReadableStream {
+export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string, toolMap: ToolMap): ReadableStream {
   // Resolve the grace-window ceiling once per stream (not at module load) so an
   // env override applied before this call is always honored regardless of which
   // spec imported the module first.
