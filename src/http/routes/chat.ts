@@ -9,10 +9,46 @@ import { emit } from "../../observability/logger.ts";
 import { updateRequest } from "../../observability/storage.ts";
 import { currentTrace } from "../../observability/tracer.ts";
 
+/**
+ * Derive a stable, string session id from the first message's content.
+ *
+ * Handles three shapes:
+ *   - string  → slice to 40 chars
+ *   - array   → use first text block's `.text`, slice to 40 chars
+ *   - other   → fall back to session-{timestamp}
+ *
+ * The old code was `(content as string)?.slice(0,40) || fallback`.
+ * For an array value, Array.prototype.slice returns an Array — which is
+ * truthy — so the `||` fallback never fired, and sessionId was an Array
+ * used as a Map key (issue #6).
+ */
+export function extractSessionId(content: unknown): string {
+  if (typeof content === "string") {
+    return content.slice(0, 40);
+  }
+  if (Array.isArray(content)) {
+    const first = content[0] as Record<string, unknown> | undefined;
+    if (first && typeof first.text === "string") {
+      return first.text.slice(0, 40);
+    }
+    return `session-${Date.now()}`;
+  }
+  return `session-${Date.now()}`;
+}
+
 export async function handleChat(req: Request): Promise<Response> {
-  const body = await req.json() as Record<string, unknown>;
+  let body: Record<string, unknown>;
+  try {
+    body = await req.json() as Record<string, unknown>;
+  } catch {
+    return Response.json(
+      { error: { message: "Invalid JSON body", type: "invalid_request_error" } },
+      { status: 400 },
+    );
+  }
+
   const messages = (body.messages as Array<Record<string, unknown>>) || [];
-  const sessionId = (messages[0]?.content as string)?.slice(0, 40) || `session-${Date.now()}`;
+  const sessionId = extractSessionId(messages[0]?.content);
 
   const trailingErrors = detectTrailingToolErrors(messages);
   if (trailingErrors >= MAX_CONSECUTIVE_TOOL_ERRORS) {
