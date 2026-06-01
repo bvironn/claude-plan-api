@@ -25,7 +25,7 @@ function resolvePendingCancelTimeoutMs(): number {
 const KEEP_ALIVE_INTERVAL_MS = 5_000;
 const KEEP_ALIVE_COMMENT = ": keep-alive\n\n";
 
-export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string, toolMap: ToolMap): ReadableStream {
+export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Array>, model: string, toolMap: ToolMap, signal?: AbortSignal): ReadableStream {
   // Resolve the grace-window ceiling once per stream (not at module load) so an
   // env override applied before this call is always honored regardless of which
   // spec imported the module first.
@@ -92,6 +92,15 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   const safeEnqueue = (controller: ReadableStreamDefaultController, data: string): boolean => {
     if (closed) return false;
     if (pendingCancel) return true; // client gone — silently drop but keep loop alive
+    // Client disconnected (request aborted): do NOT call controller.enqueue().
+    // Writing into a server response-stream sink that Bun is tearing down on
+    // abort triggers a native use-after-free → SIGSEGV (observed on Bun 1.3.13
+    // `streams.finalize`/free and 1.3.14 `Sink.write`/`writeLatin1`). The JS
+    // `closed` flag is set by our own cancel() callback, but Bun can free the
+    // sink BEFORE invoking it, so an in-flight chunk would still race the free.
+    // `signal.aborted` flips synchronously the moment the client goes away, so
+    // checking it immediately before the native write is what closes the race.
+    if (signal?.aborted) { closed = true; return false; }
     try {
       controller.enqueue(data);
       return true;

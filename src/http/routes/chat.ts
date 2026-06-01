@@ -93,7 +93,20 @@ export async function handleChat(req: Request): Promise<Response> {
   resetToolErrorCounter(sessionId);
 
   if (isStream) {
-    return new Response(streamAnthropicToOpenai(res.body!, model, toolMap), {
+    // Encode SSE chunks to bytes BEFORE handing the stream to Bun. Bun's HTTP
+    // response sink segfaults (native use-after-free in `writeLatin1`) when a
+    // STRING-typed ReadableStream body is torn down on an immediate client
+    // abort (Bun ≤1.3.14). Feeding pre-encoded Uint8Array chunks routes around
+    // the Latin1→UTF8 sink path that crashes. `streamAnthropicToOpenai` keeps
+    // emitting strings (tests + the FIM/completions transform depend on that),
+    // so we encode here at the HTTP boundary.
+    const enc = new TextEncoder();
+    const byteStream = streamAnthropicToOpenai(res.body!, model, toolMap, req.signal).pipeThrough(
+      new TransformStream<string, Uint8Array>({
+        transform(chunk, controller) { controller.enqueue(enc.encode(chunk)); },
+      }),
+    );
+    return new Response(byteStream, {
       headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
     });
   }

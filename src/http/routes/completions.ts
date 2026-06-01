@@ -221,7 +221,7 @@ export async function handleCompletions(req: Request): Promise<Response> {
 
   // --- Streaming path ---
   if (isStream) {
-    const chatStream = streamAnthropicToOpenai(res.body!, resolvedModel, toolMap);
+    const chatStream = streamAnthropicToOpenai(res.body!, resolvedModel, toolMap, req.signal);
     const textStream = chatChunkToTextChunkStream(chatStream, resolvedModel);
     return new Response(textStream, {
       headers: {
