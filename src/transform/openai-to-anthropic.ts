@@ -681,7 +681,16 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   }
 
   if (body.tools && (body.tools as unknown[]).length > 0) {
-    result.tools = (body.tools as Array<Record<string, unknown>>).map((t) => {
+    // Sort a copy by client function.name (ascending code-unit order) before mapping.
+    // This ensures identical tool sets in any arrival order produce a byte-identical
+    // upstream tools[] array, keeping the cache prefix anchored at tools[-1] stable.
+    // Original body.tools is NOT mutated.
+    const nameOf = (t: Record<string, unknown>) =>
+      ((t.function as Record<string, unknown>).name as string);
+    const sortedTools = [...(body.tools as Array<Record<string, unknown>>)].sort(
+      (a, b) => (nameOf(a) < nameOf(b) ? -1 : nameOf(a) > nameOf(b) ? 1 : 0),
+    );
+    result.tools = sortedTools.map((t) => {
       const fn = t.function as Record<string, unknown>;
       return {
         name: mapToolName(fn.name as string, toolMap),
