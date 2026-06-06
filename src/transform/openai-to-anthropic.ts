@@ -555,9 +555,14 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     }
   }
 
-  addCacheControlToLastUserBlock(messages);
-
+  // S7 pipeline: repair → strip client cache_control → budget-aware breakpoint planner.
+  // Breakpoints must land on post-repair blocks (pre-repair orphans get removed),
+  // and client-supplied markers must be cleared so the planner is the sole authority.
   const repaired = repairToolPairs(messages);
+  stripClientCacheControl(repaired);
+  const hasTools = !!(body.tools && (body.tools as unknown[]).length > 0);
+  const budget = 4 - (includeIdentity ? 1 : 0) - (hasTools ? 1 : 0);
+  applyCacheBreakpoints(repaired, budget);
 
   // Resolve the per-model default max_tokens from the registry. Falls back
   // to a conservative 64000 when the upstream hasn't declared it (old models,
@@ -763,26 +768,78 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   return { body: result, isStructuredOutput, toolMap };
 }
 
-function addCacheControlToLastUserBlock(messages: AnthropicMessage[]): void {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (!msg) continue;
-    if (msg.role !== "user") continue;
+/**
+ * Strip any `cache_control` keys from every content block in messages[].
+ * Does NOT touch system[] (gateway-constructed) or tools[] (rebuilt field-by-field).
+ * Runs before applyCacheBreakpoints so the planner is the sole authority on markers.
+ */
+function stripClientCacheControl(messages: AnthropicMessage[]): void {
+  for (const msg of messages) {
+    if (typeof msg.content === "string") continue;
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content as Array<Record<string, unknown>>) {
+      delete block.cache_control;
+    }
+  }
+}
 
+/**
+ * Place cache_control breakpoints on user messages using the budget.
+ * Priority 1: last content block of the last user message.
+ * Priority 2: last content block of the second-to-last user message (intermediate),
+ *             placed only when budget >= 2 and there are >= 2 user messages.
+ * String content is wrapped into a single text block (preserving existing behavior).
+ * A missing anchor block (empty content) skips placement without consuming a slot.
+ * Marker shape: { type: "ephemeral", ttl: "1h" }.
+ */
+function applyCacheBreakpoints(messages: AnthropicMessage[], budget: number): void {
+  if (budget <= 0) return;
+
+  // Collect user-message indices (walking forward preserves order).
+  const userIndices: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]?.role === "user") userIndices.push(i);
+  }
+
+  if (userIndices.length === 0) return;
+
+  const marker = { type: "ephemeral", ttl: "1h" };
+
+  /**
+   * Place cache_control on the last content block of messages[idx].
+   * Normalizes string content to an array first (matches old behavior).
+   * Returns true if placement succeeded (block existed), false if skipped.
+   */
+  function placeOnLastBlock(idx: number): boolean {
+    const msg = messages[idx];
+    if (!msg) return false;
+
+    // Normalize string → array so we can attach to the block.
     if (typeof msg.content === "string") {
       msg.content = [
-        { type: "text", text: msg.content, cache_control: { type: "ephemeral", ttl: "1h" } },
+        { type: "text", text: msg.content },
       ] as unknown as AnthropicMessage["content"];
-      return;
     }
-    if (Array.isArray(msg.content)) {
-      const arr = msg.content as Array<Record<string, unknown>>;
-      const last = arr[arr.length - 1];
-      if (last) {
-        last.cache_control = { type: "ephemeral", ttl: "1h" };
-      }
-    }
-    return;
+
+    if (!Array.isArray(msg.content)) return false;
+
+    const arr = msg.content as Array<Record<string, unknown>>;
+    const last = arr[arr.length - 1];
+    if (!last) return false; // empty content — skip without consuming slot
+
+    last.cache_control = marker;
+    return true;
+  }
+
+  // Priority 1: last user message.
+  const lastIdx = userIndices[userIndices.length - 1]!;
+  placeOnLastBlock(lastIdx);
+
+  // Priority 2: second-to-last user message (intermediate), only when budget allows
+  // and a second-to-last exists.
+  if (budget >= 2 && userIndices.length >= 2) {
+    const secondToLastIdx = userIndices[userIndices.length - 2]!;
+    placeOnLastBlock(secondToLastIdx);
   }
 }
 

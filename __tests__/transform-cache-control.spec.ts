@@ -221,7 +221,11 @@ describe("openaiToAnthropic — cache_control breakpoints (last user block + las
   });
 
   // --- REQ Budget Ceiling ---
-  test("realistic request (identity + last-user tool_results + 3 tools) → cache_control count is exactly 3 and ≤ 4", () => {
+  // This fixture has 2 user messages: the "start" user turn and the tool_result
+  // batch user turn. Under S7, with identity on and tools present, budget = 4-1-1=2
+  // for user messages. With 2 user messages: last user (slot 1) + intermediate/first
+  // user (slot 2) → 4 total breakpoints (identity + tools + last user + intermediate).
+  test("realistic request (identity + last-user tool_results + 3 tools) → cache_control count is exactly 4 and ≤ 4", () => {
     const { body } = openaiToAnthropic({
       model: "sonnet",
       clean_system: false,  // force identity ON so the identity cache_control anchor is present
@@ -247,6 +251,6 @@ describe("openaiToAnthropic — cache_control breakpoints (last user block + las
 
     const total = countCacheControl(body);
     expect(total).toBeLessThanOrEqual(4);
-    expect(total).toBe(3);
+    expect(total).toBe(4);
   });
 });
