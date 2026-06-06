@@ -186,7 +186,7 @@ The streaming path MUST use the same shared stop-reason module as the non-stream
 
 ### Requirement: cache usage in non-streaming responses
 
-The non-streaming response transform MUST include `usage.prompt_tokens_details.cached_tokens` (sourced from Anthropic `usage.cache_read_input_tokens`) and `usage.cache_creation_input_tokens` (sourced from Anthropic `usage.cache_creation_input_tokens`) in the returned OpenAI object. When the upstream omits either field (or provides 0), the corresponding output field MUST be 0.
+The non-streaming response transform MUST include `usage.prompt_tokens_details.cached_tokens` (sourced from Anthropic `usage.cache_read_input_tokens`) and `usage.cache_creation_input_tokens` (sourced from Anthropic `usage.cache_creation_input_tokens`) in the returned OpenAI object. When the upstream omits `cache_read_input_tokens` (or provides 0), `prompt_tokens_details.cached_tokens` MUST be 0. `cache_creation_input_tokens` MUST be emitted only when its upstream value is greater than 0; otherwise it MUST be absent from the output object.
 
 #### Scenario: cache read tokens surfaced
 
@@ -211,7 +211,7 @@ The non-streaming response transform MUST include `usage.prompt_tokens_details.c
 
 ### Requirement: cache usage in streaming finish chunk
 
-The streaming finish chunk (emitted on `message_delta`) MUST include `usage.prompt_tokens_details.cached_tokens` (from `cache_read_input_tokens` captured at `message_start`) and `usage.cache_creation_input_tokens` (from `cache_creation_input_tokens` captured at `message_start`). When the upstream omits either field, the corresponding value MUST be 0.
+The streaming finish chunk (emitted on `message_delta`) MUST include `usage.prompt_tokens_details.cached_tokens` (from `cache_read_input_tokens` captured at `message_start`) and `usage.cache_creation_input_tokens` (from `cache_creation_input_tokens` captured at `message_start`). When the upstream omits `cache_read_input_tokens`, `prompt_tokens_details.cached_tokens` MUST be 0. `cache_creation_input_tokens` MUST be emitted only when its captured value is greater than 0; otherwise it MUST be absent from the finish chunk.
 
 #### Scenario: streaming cache read tokens in finish chunk
 
