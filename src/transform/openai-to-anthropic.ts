@@ -726,14 +726,17 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   }
 
   // Map OpenAI stop → Anthropic stop_sequences.
-  // string → [string]; string[] → copy (filter empty strings); empty / absent → omit.
+  // Collect candidates from either the single-string or array form, then apply
+  // one shared filter: empty strings are excluded from both paths. An absent,
+  // null, empty, or all-empty-string stop results in stop_sequences being omitted.
   const rawStop = body.stop;
   if (rawStop !== undefined && rawStop !== null) {
-    const normalized: string[] = typeof rawStop === "string"
+    const candidates: unknown[] = typeof rawStop === "string"
       ? [rawStop]
       : Array.isArray(rawStop)
-        ? (rawStop as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+        ? (rawStop as unknown[])
         : [];
+    const normalized = candidates.filter((s): s is string => typeof s === "string" && s.length > 0);
     if (normalized.length > 0) {
       result.stop_sequences = normalized;
     }

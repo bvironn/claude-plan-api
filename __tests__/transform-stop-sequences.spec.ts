@@ -30,4 +30,19 @@ describe("openaiToAnthropic — stop to stop_sequences mapping", () => {
     const body = transform();
     expect("stop_sequences" in body).toBe(false);
   });
+
+  test("empty string stop omits stop_sequences", () => {
+    const body = transform({ stop: "" });
+    expect("stop_sequences" in body).toBe(false);
+  });
+
+  test("array containing only empty strings omits stop_sequences", () => {
+    const body = transform({ stop: ["", ""] });
+    expect("stop_sequences" in body).toBe(false);
+  });
+
+  test("mixed array with empty strings — empty entries stripped", () => {
+    const body = transform({ stop: ["", "x"] });
+    expect(body.stop_sequences).toEqual(["x"]);
+  });
 });
