@@ -378,7 +378,15 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   const sanitizedMessages = sanitizeOpenAIMessages(rawMessages);
 
   for (const msg of sanitizedMessages) {
-    if (msg.role === "system") {
+    // OpenAI's `developer` role (o1+ models) is the system-level instruction
+    // channel — semantically identical to `system`. Anthropic only accepts
+    // `user`/`assistant` in messages[], so we collect `developer` exactly like
+    // `system` and forward it via the first-user-message prefix below. Without
+    // this, `developer` falls through to the generic branch and is pushed as
+    // `{ role: "developer" }`, which Anthropic rejects (HTTP 400: "Allowed
+    // roles are user or assistant"). Treating it as system is what makes the
+    // gateway truly OpenAI-compatible.
+    if (msg.role === "system" || msg.role === "developer") {
       const text = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
       systemPrompt = systemPrompt ? `${systemPrompt}\n\n${text}` : text;
     } else if (msg.role === "assistant" && msg.tool_calls) {
