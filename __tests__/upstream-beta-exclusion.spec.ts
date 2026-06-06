@@ -122,6 +122,20 @@ describe("headers — REQ-7: buildBetas respects excluded set", () => {
   });
 });
 
+describe("headers — REQ-7 invariant: buildBetas always contains a structured-outputs beta", () => {
+  test("structured-output path (isStructuredOutput:true) includes a structured-outputs- beta", () => {
+    const betas = buildBetas("claude-sonnet-4-6", true);
+    const parts = betas.split(",");
+    expect(parts.some((b) => /structured-outputs-/.test(b))).toBe(true);
+  });
+
+  test("chat path (isStructuredOutput:false) includes a structured-outputs- beta", () => {
+    const betas = buildBetas("claude-sonnet-4-6", false);
+    const parts = betas.split(",");
+    expect(parts.some((b) => /structured-outputs-/.test(b))).toBe(true);
+  });
+});
+
 describe("headers — REQ-8: buildHeaders threads excluded through", () => {
   test("REQ-8 anthropic-beta header omits excluded beta", () => {
     const headers = buildHeaders("claude-opus-4-6", false, new Set(["context-1m-2025-08-07"]));
