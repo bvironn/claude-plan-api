@@ -687,15 +687,55 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
         name: mapToolName(fn.name as string, toolMap),
         description: (fn.description as string) || "",
         input_schema: fn.parameters || { type: "object", properties: {} },
+        // Forward strict only when literally true (design: no runtime beta gating needed).
+        ...(fn.strict === true ? { strict: true } : {}),
       };
     });
     addCacheControlToLastTool(result.tools as Array<Record<string, unknown>>);
-    // Mirror the reference plugin: when tools are declared, default
-    // `tool_choice` to `{type: "auto"}` unless the caller supplied
-    // one explicitly. The plugin always sends this and the server
-    // accepts it as a no-op when no tool is actually invoked.
-    if (!result.tool_choice) {
-      result.tool_choice = { type: "auto" };
+
+    // Resolve tool_choice AFTER the .map() so the ToolMap is fully populated
+    // and named-function lookup via toolMap.forward[name] works correctly.
+    const rawTc = body.tool_choice;
+    let resolvedTc: Record<string, unknown>;
+    if (rawTc === "none") {
+      resolvedTc = { type: "none" };
+    } else if (rawTc === "required") {
+      resolvedTc = { type: "any" };
+    } else if (typeof rawTc === "object" && rawTc !== null && (rawTc as Record<string, unknown>).type === "function") {
+      const fn = (rawTc as Record<string, unknown>).function as Record<string, unknown> | undefined;
+      const fnName = fn?.name as string | undefined;
+      const mappedName = fnName ? toolMap.forward[fnName] : undefined;
+      if (mappedName) {
+        resolvedTc = { type: "tool", name: mappedName };
+      } else {
+        emit("warn", "transform.tool_choice.unknown_function", { requestedName: fnName });
+        resolvedTc = { type: "auto" };
+      }
+    } else {
+      // "auto", absent, or unrecognized → default to auto
+      resolvedTc = { type: "auto" };
+    }
+
+    // Merge disable_parallel_tool_use when parallel_tool_calls is false,
+    // but skip it when tool_choice is "none" (no tool runs, flag is moot).
+    if (body.parallel_tool_calls === false && resolvedTc.type !== "none") {
+      resolvedTc.disable_parallel_tool_use = true;
+    }
+
+    result.tool_choice = resolvedTc;
+  }
+
+  // Map OpenAI stop → Anthropic stop_sequences.
+  // string → [string]; string[] → copy (filter empty strings); empty / absent → omit.
+  const rawStop = body.stop;
+  if (rawStop !== undefined && rawStop !== null) {
+    const normalized: string[] = typeof rawStop === "string"
+      ? [rawStop]
+      : Array.isArray(rawStop)
+        ? (rawStop as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+        : [];
+    if (normalized.length > 0) {
+      result.stop_sequences = normalized;
     }
   }
 
