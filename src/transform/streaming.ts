@@ -2,6 +2,8 @@ import { unmapToolName, type ToolMap } from "../domain/tool-mapping.ts";
 import { emit } from "../observability/logger.ts";
 import { updateRequest } from "../observability/storage.ts";
 import { currentTrace } from "../observability/tracer.ts";
+import { toFinishReason } from "./stop-reason.ts";
+import { buildOpenAiUsage } from "./usage.ts";
 
 const MAX_RESPONSE_BODY = 5 * 1024 * 1024; // 5 MB
 const DEFAULT_PENDING_CANCEL_TIMEOUT_MS = 30_000;
@@ -37,7 +39,6 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
   let toolIndex = -1;
   let sentRole = false;
   let accumulatedResponse = "";
-  const stopMap: Record<string, string> = { end_turn: "stop", max_tokens: "length", stop_sequence: "stop", tool_use: "tool_calls" };
   function chunk(data: Record<string, unknown>): string {
     return `data: ${JSON.stringify(data)}\n\n`;
   }
@@ -216,8 +217,13 @@ export function streamAnthropicToOpenai(anthropicStream: ReadableStream<Uint8Arr
             if (event.usage) usage.output_tokens = event.usage.output_tokens || 0;
             if (!safeEnqueue(controller, chunk({
               id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-              choices: [{ index: 0, delta: {}, finish_reason: stopMap[event.delta?.stop_reason] || "stop" }],
-              usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens, total_tokens: usage.input_tokens + usage.output_tokens },
+              choices: [{ index: 0, delta: {}, finish_reason: toFinishReason(event.delta?.stop_reason) }],
+              usage: buildOpenAiUsage({
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+              }),
             }))) return "break";
           }
         } catch {}

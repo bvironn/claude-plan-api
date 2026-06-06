@@ -1,5 +1,7 @@
 import { unmapToolName, type ToolMap } from "../domain/tool-mapping.ts";
 import { emit } from "../observability/logger.ts";
+import { toFinishReason } from "./stop-reason.ts";
+import { buildOpenAiUsage } from "./usage.ts";
 
 export function anthropicToOpenai(res: Record<string, unknown>, model: string, toolMap: ToolMap): Record<string, unknown> {
   // No deobfuscation needed - Anthropic responds in plain text
@@ -19,7 +21,6 @@ export function anthropicToOpenai(res: Record<string, unknown>, model: string, t
     .filter((c) => c.type === "thinking")
     .map((c) => (c.thinking as string) ?? "")
     .join("\n\n");
-  const stopMap: Record<string, string> = { end_turn: "stop", max_tokens: "length", stop_sequence: "stop", tool_use: "tool_calls" };
   const message: Record<string, unknown> = { role: "assistant", content: textBlock?.text as string || null };
   if (reasoningText.length > 0) {
     message.reasoning_content = reasoningText;
@@ -46,11 +47,12 @@ export function anthropicToOpenai(res: Record<string, unknown>, model: string, t
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{ index: 0, message, finish_reason: stopMap[res.stop_reason as string] || "stop" }],
-    usage: {
-      prompt_tokens: usage.input_tokens || 0,
-      completion_tokens: usage.output_tokens || 0,
-      total_tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
-    },
+    choices: [{ index: 0, message, finish_reason: toFinishReason(res.stop_reason) }],
+    usage: buildOpenAiUsage({
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      cache_read_input_tokens: usage.cache_read_input_tokens,
+      cache_creation_input_tokens: usage.cache_creation_input_tokens,
+    }),
   };
 }
