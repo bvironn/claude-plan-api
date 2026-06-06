@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
   initStorage,
@@ -46,7 +46,7 @@ describe("storage — upstream_request_body column", () => {
     // Build a DB with the PREVIOUS full schema (every column except the new
     // `upstream_request_body`) so the migration has a realistic starting point.
     const logsDir = join(tmpDir, "logs");
-    Bun.spawnSync(["mkdir", "-p", logsDir]);
+    mkdirSync(logsDir, { recursive: true });
     const dbPath = join(logsDir, "telemetry.db");
     const pre = new Database(dbPath);
     pre.exec(`
