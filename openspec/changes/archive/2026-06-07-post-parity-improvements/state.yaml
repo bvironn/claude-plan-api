@@ -1,0 +1,14 @@
+change: post-parity-improvements
+artifact_store: openspec
+delivery: direct work-unit commits to master (no PRs); push at end
+phases:
+  explore: done        # explore.md
+  propose: done        # proposal.md
+  spec: done        # specs/transform-parity/spec.md, specs/cache-strategy/spec.md
+  design: done      # design.md
+  tasks: done       # tasks.md
+  apply: done        # WU1 fba3e74, WU2 c7a5688, WU3 02582cf; remediation beb9fd3; 369 tests pass
+  verify: done       # re-verified after beb9fd3; verify-report.md (Re-verification section)
+  archive: done        # archive-report.md
+verify_verdict: PASS_WITH_WARNINGS  # 0 CRITICAL, 3 WARNING (W-R1 new doc-only; W3, W4 residual), 2 SUGGESTION; push unblocked
+updated: 2026-06-07
