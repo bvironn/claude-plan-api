@@ -240,55 +240,24 @@ describe("cache_control breakpoint planner (S7)", () => {
   // Budget exhaustion: intermediate dropped first
   // -------------------------------------------------------------------------
 
-  test("intermediate breakpoint dropped when budget exhausted by identity + tools + final user", () => {
-    // identity (slot 1) + tools (slot 2) + final user (slot 3) = 3 consumed
-    // budget = 4 - 1 - 1 = 2 → only 2 user slots, BUT with 1 user message
-    // there's no second-to-last user message → intermediate is absent anyway.
-    // To truly exhaust budget: need identity + tools + 1 user message → budget=2 → intermediate needs ≥2 users
-    // With 1 user message: budget=2, but only 1 user → intermediate skipped (only 1 user).
-    // The interesting case: identity + tools + 2 user messages → budget=2 → both user slots filled, total=4.
-    // "Budget exhausted" means identity+tools+final user consume 3, no slot left for intermediate.
-    // That requires identity(1)+tools(1)+finalUser(1) = 3 slots, leaving 1 slot for intermediate.
-    // But if there's no intermediate user message (only 1 user msg), intermediate is dropped.
-    // The spec scenario: "identity (slot 1) + tools (slot 2) + final user (slot 3) = 3 consumed, no fourth slot"
-    // This only happens when there IS a second-to-last user message but budget is exactly 1.
-    // That's impossible with the formula: budget = 4 - 1 - 1 = 2, so intermediate always gets a slot.
-    // Re-reading spec: "budget exhausted" = when all 3 non-intermediate slots are used and no 4th remains.
-    // Actually: with identity=on, tools=on → budget=2. With ≥2 user messages: last user(1) + intermediate(1) = 2 = budget. Total = 4.
-    // "Exhausted before intermediate" = identity+tools+lastUser = 3 → budget=4-1-1=2 → 2 user slots → intermediate gets slot 2.
-    // The only way to exhaust is when budget < 2: identity+tools → budget=2, which always fits intermediate.
-    // But the spec says "budget exhausted by identity+tools+lastUser": this means 3 slots used, 1 slot left = intermediate.
-    // Actually wait: budget for USER messages = 4 - identity - tools. With identity+tools: budget=2. ≥2 users → both slots used. Total=4.
-    // "Budget exhausted" scenario from spec: identity+tools+finalUser consume 3, no 4th. But with identity+tools budget=2, finalUser(1) + intermediate(1) = 2. So budget IS enough.
-    // The scenario where intermediate is dropped: budget=1 (identity on, tools on... wait that's budget=2).
-    // Actually rereading: budget = 4 - (identity?1:0) - (tools?1:0), and intermediate needs budget≥2.
-    // If identity=on, tools=on → budget=2 ≥ 2 → intermediate placed.
-    // If identity=on, tools=off → budget=3 ≥ 2 → intermediate placed.
-    // If identity=off, tools=on → budget=3 ≥ 2 → intermediate placed.
-    // If identity=off, tools=off → budget=4 ≥ 2 → intermediate placed.
-    // So intermediate is ALWAYS placed when ≥2 user messages and budget≥2 (always true).
-    // The "dropped" case is when there's only 1 user message (no second-to-last).
-    // The spec's "budget exhausted by identity+tools+finalUser → total=3" scenario is when ≥2 users exist
-    // but budget after identity+tools is 2, and... wait that gives 4 total.
-    // I think the spec means: identity(1)+tools(1)+lastUser(1) = 3, intermediate needs 1 more → budget=4-1-1=2 for user msgs → lastUser(1)+intermediate(1)=2 → total=4 is fine.
-    // The "total=3" scenario from spec only happens when intermediate IS dropped because budget<2.
-    // But budget = 4-(identity?1:0)-(tools?1:0) is always ≥2 (min is 4-1-1=2). So intermediate is always placed when ≥2 users.
-    // This test verifies the scenario described in tasks: 1 user message → intermediate dropped → total=3 when identity+tools active.
+  test("intermediate breakpoint absent when only one user message exists — total three (skip rule, not eviction)", () => {
+    // budget = 4 - identity(1) - tools(1) = 2. With only 1 user message there is
+    // no second-to-last to anchor the intermediate slot, so it is naturally absent.
+    // The eviction-priority invariant is enforced structurally: budget >= 2 always,
+    // so the guard in applyCacheBreakpoints never evicts intermediate when >= 2 users exist.
     const { body } = openaiToAnthropic({
       model: "sonnet",
       clean_system: false, // identity ON
       messages: [
-        // Only 1 user message → no intermediate possible
         { role: "user", content: "only user" },
       ],
-      tools: [makeTool("search")], // tools present
+      tools: [makeTool("search")],
     });
 
+    // identity (1) + tool (1) + last user (1) = 3 total
     const total = countCacheControl(body);
-    // identity (1) + tool (1) + last user (1) = 3
     expect(total).toBe(3);
 
-    // No intermediate — only 1 user message
     const messages = body.messages as Block[];
     const userMsgs = messages.filter((m) => m.role === "user");
     expect(userMsgs).toHaveLength(1);
@@ -327,14 +296,12 @@ describe("cache_control breakpoint planner (S7)", () => {
     const userMsgs = messages.filter((m) => m.role === "user");
     expect(userMsgs).toHaveLength(2);
 
-    // First user message's block: client marker must be gone, replaced by planner marker
+    // First user message (intermediate slot): client "5m" marker stripped, planner "1h" marker placed.
+    // With 2 user messages and no identity/tools, budget=4 → intermediate IS placed unconditionally.
     const firstContent = userMsgs[0]!.content as Block[];
     const firstBlock = firstContent[firstContent.length - 1]!;
-    // If planner places intermediate here, it should have EPHEMERAL_1H (not the client "5m" marker)
-    // Planner uses { type: "ephemeral", ttl: "1h" }
-    if (firstBlock.cache_control) {
-      expect(firstBlock.cache_control).toEqual(EPHEMERAL_1H);
-    }
+    // Hard assertion — no conditional. Intermediate slot is always filled when budget allows.
+    expect(firstBlock.cache_control).toEqual(EPHEMERAL_1H);
 
     // The "5m" client marker must NOT survive anywhere in messages
     const messagesStr = JSON.stringify(messages);
@@ -342,42 +309,106 @@ describe("cache_control breakpoint planner (S7)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Post-repair placement
+  // C1 regression: client cache_control nested inside tool_result.content must be stripped
   // -------------------------------------------------------------------------
 
-  test("breakpoints land on post-repair blocks, not orphaned tool_result blocks", () => {
-    // A request with a tool_result that has no matching tool_use (orphan).
-    // repairToolPairs removes the orphaned tool_result.
-    // The planner runs after repair, so the breakpoint lands on a surviving block.
+  test("client cache_control nested in tool_result.content is stripped — total upstream markers ≤ 4", () => {
+    // Reproduces the C1 probe: a tool-role message whose array content carries
+    // a client-supplied cache_control marker with ttl:"5m". The strip pass must
+    // recurse into block.content arrays (tool_result nesting) so the smuggled
+    // marker never reaches the upstream body.
+    //
+    // Setup: identity ON (slot 1), tools present (slot 2), one user message (slot 3),
+    // plus a tool_result carrying a nested cache_control → would be slot 5 without fix.
     const { body } = openaiToAnthropic({
       model: "sonnet",
-      clean_system: true,
+      clean_system: false, // identity ON — slot 1
       messages: [
-        { role: "user", content: "first user" },
-        // orphaned tool_result (no preceding assistant tool_use) — repaired away
+        { role: "user", content: "user turn" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "search", arguments: "{}" },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          // Array content on a tool message → becomes tool_result.content[]
+          content: [
+            {
+              type: "text",
+              text: "tool result text",
+              cache_control: { type: "ephemeral", ttl: "5m" }, // smuggled client marker
+            },
+          ],
+        },
+        { role: "user", content: "follow-up" },
+      ],
+      tools: [makeTool("search")], // tools present — slot 2
+    });
+
+    // The total upstream cache_control count MUST NOT exceed 4.
+    const total = countCacheControl(body);
+    expect(total).toBeLessThanOrEqual(4);
+
+    // The client's "5m" ttl marker must not survive anywhere in the body.
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toContain('"ttl":"5m"');
+  });
+
+  // -------------------------------------------------------------------------
+  // Post-repair placement — discriminating fixture
+  // -------------------------------------------------------------------------
+
+  test("planner runs after repairToolPairs: breakpoint lands on surviving user block, not on orphaned tool_result", () => {
+    // Discriminating fixture: the orphaned tool_result message is LAST in the
+    // conversation (as an OpenAI "tool" role), so in Anthropic format it becomes
+    // the last "user" message before repair.
+    //
+    // Under the pre-change pipeline (planner before repair):
+    //   1. Planner sees the orphaned tool_result batch as last "user" message.
+    //   2. Planner places cache_control on its last block.
+    //   3. repairToolPairs removes the orphan batch → cache_control gone.
+    //   4. The real last user message has NO breakpoint. ← WRONG
+    //
+    // Under the fixed pipeline (repair then planner):
+    //   1. repairToolPairs removes the orphan batch first.
+    //   2. Planner sees only the real user message as last user.
+    //   3. Planner places cache_control on the real last user message. ← CORRECT
+    //
+    // This fixture FAILS under the pre-change order and PASSES under the
+    // planner-after-repairToolPairs order.
+    const { body } = openaiToAnthropic({
+      model: "sonnet",
+      clean_system: true, // identity OFF, no tools → budget = 4
+      messages: [
+        { role: "user", content: "real user message" },
+        // orphaned tool_result (no preceding assistant tool_use) appended LAST
         { role: "tool", tool_call_id: "orphan_id", content: "orphan result" },
-        { role: "user", content: "last user" },
       ],
     });
 
     const messages = body.messages as Block[];
-    // After repair, the orphaned tool_result batch is removed or kept
-    // depending on repairToolPairs behavior. The important thing is that
-    // any cache_control that exists is on a surviving block.
-    // We just verify the total count is ≤ 4 and system[0] has no cache_control.
-    const total = countCacheControl(body);
-    expect(total).toBeLessThanOrEqual(4);
-
-    const system = body.system as Block[];
-    expect(system[0]!.cache_control).toBeUndefined();
-
-    // At minimum, the last user message should have cache_control
     const userMsgs = messages.filter((m) => m.role === "user");
-    if (userMsgs.length > 0) {
-      const lastUser = userMsgs[userMsgs.length - 1]!;
-      const content = lastUser.content as Block[];
-      const lastBlock = content[content.length - 1]!;
-      expect(lastBlock.cache_control).toEqual(EPHEMERAL_1H);
-    }
+
+    // After repair the orphan batch is gone → exactly 1 user message remains.
+    expect(userMsgs).toHaveLength(1);
+
+    // That surviving user message MUST carry the breakpoint.
+    const lastUser = userMsgs[userMsgs.length - 1]!;
+    const content = lastUser.content as Block[];
+    const lastBlock = content[content.length - 1]!;
+    // Hard assertion — no conditional. Planner must have placed the marker here.
+    expect(lastBlock.cache_control).toEqual(EPHEMERAL_1H);
+
+    // Total: exactly 1 (no identity, no tools, no intermediate — only 1 user).
+    const total = countCacheControl(body);
+    expect(total).toBe(1);
   });
 });

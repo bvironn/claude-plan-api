@@ -769,17 +769,40 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
 }
 
 /**
- * Strip any `cache_control` keys from every content block in messages[].
+ * Strip any `cache_control` keys from a content-block array, recursing into
+ * nested `block.content` arrays (e.g. tool_result.content[]).
+ * Does NOT mutate block objects in-place — clones each block so caller-owned
+ * objects are never modified.
+ */
+function stripCacheControlFromBlocks(
+  blocks: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return blocks.map((block) => {
+    const cloned = { ...block };
+    delete cloned.cache_control;
+    if (Array.isArray(cloned.content)) {
+      cloned.content = stripCacheControlFromBlocks(
+        cloned.content as Array<Record<string, unknown>>,
+      );
+    }
+    return cloned;
+  });
+}
+
+/**
+ * Strip any `cache_control` keys from every content block in messages[],
+ * including blocks nested inside tool_result.content arrays (any depth).
  * Does NOT touch system[] (gateway-constructed) or tools[] (rebuilt field-by-field).
  * Runs before applyCacheBreakpoints so the planner is the sole authority on markers.
+ * Clones block objects rather than mutating caller-supplied references.
  */
 function stripClientCacheControl(messages: AnthropicMessage[]): void {
   for (const msg of messages) {
     if (typeof msg.content === "string") continue;
     if (!Array.isArray(msg.content)) continue;
-    for (const block of msg.content as Array<Record<string, unknown>>) {
-      delete block.cache_control;
-    }
+    msg.content = stripCacheControlFromBlocks(
+      msg.content as Array<Record<string, unknown>>,
+    ) as unknown as AnthropicMessage["content"];
   }
 }
 
@@ -803,11 +826,10 @@ function applyCacheBreakpoints(messages: AnthropicMessage[], budget: number): vo
 
   if (userIndices.length === 0) return;
 
-  const marker = { type: "ephemeral", ttl: "1h" };
-
   /**
    * Place cache_control on the last content block of messages[idx].
    * Normalizes string content to an array first (matches old behavior).
+   * Each call creates a fresh marker object to avoid shared-reference hazards.
    * Returns true if placement succeeded (block existed), false if skipped.
    */
   function placeOnLastBlock(idx: number): boolean {
@@ -827,7 +849,8 @@ function applyCacheBreakpoints(messages: AnthropicMessage[], budget: number): vo
     const last = arr[arr.length - 1];
     if (!last) return false; // empty content — skip without consuming slot
 
-    last.cache_control = marker;
+    // Fresh marker object per placement — no aliasing between slots.
+    last.cache_control = { type: "ephemeral", ttl: "1h" };
     return true;
   }
 
