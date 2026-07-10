@@ -38,10 +38,10 @@ Chain strategy: pending
 
 ## Phase 2: Core Auth — Domain + Guard
 
-- [ ] 2.1 Write domain unit tests: key format, `hashKey()` determinism+pepper sensitivity, `parseKeyFromHeaders()` Bearer/X-API-Key precedence, WeakMap set/get (TDD: test first)
-- [ ] 2.2 Write guard unit tests: exempt→null, gated missing/invalid/revoked→401, gated valid→null+attributed (TDD: test first)
-- [ ] 2.3 Create `src/domain/api-keys.ts`: `generateKey()` (cpk_ prefix.secret), `hashKey()` (HMAC-SHA256 with pepper), `parseKeyFromHeaders()`, request→keyId WeakMap
-- [ ] 2.4 Create `src/guards/api-key.ts`: `enforceApiKey(req): Response | null` — gated predicate `/v1/*`||`/api/*`, HMAC hash lookup, 401 short-circuit, emit warn on reject
+- [x] 2.1 Write domain unit tests: key format, `hashKey()` determinism+pepper sensitivity, `parseKeyFromHeaders()` Bearer/X-API-Key precedence, WeakMap set/get (TDD: test first)
+- [x] 2.2 Write guard unit tests: exempt→null, gated missing/invalid/revoked→401, gated valid→null+attributed (TDD: test first)
+- [x] 2.3 Create `src/domain/api-keys.ts`: `generateKey()` (cpk_ prefix.secret), `hashKey()` (HMAC-SHA256 with pepper), `parseKeyFromHeaders()`, request→keyId WeakMap
+- [x] 2.4 Create `src/guards/api-key.ts`: `enforceApiKey(req): Response | null` — gated predicate `/v1/*`||`/api/*`, HMAC hash lookup, 401 short-circuit, emit warn on reject
 
 ## Phase 3: Integration — Wiring, CLI, Route
 
