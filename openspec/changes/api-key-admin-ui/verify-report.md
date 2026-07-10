@@ -775,3 +775,82 @@ But the one thing this unit was explicitly supposed to deliver — closing the r
 2. Once requests persist again, perform the missing verification: issue a `/v1/*` call with a live key, `GET /api/telemetry/usage`, confirm `/keys`'s usage column renders correctly.
 3. Decide on W1 (clear-key UI) — add a control or explicitly accept replace-only.
 4. Tests, typecheck, code reuse, scope, and size:exception reasoning are all solid and need no rework.
+
+---
+
+## Verification Report — Unit 3 / PR 3 RE-VERIFICATION (fresh-context gate re-review, post PR #18 discovery)
+
+**Change**: api-key-admin-ui
+**Unit**: 3 of 3 (FINAL) — second fresh-context gate pass over the same branch, triggered by the CRITICAL above and the subsequent discovery that a fix now exists (open, unmerged). Branch `feat/keys-admin-ui-route` off `feat/keys-admin-auth-infra` HEAD `861abd4` (re-confirmed via `git merge-base`). **3 commits ahead of base, not 2**: `63ac7b7` (api.ts client fns + `ui-api-keys.spec.ts`, 270 ins — already reviewed above, clean) + `cf3e80a` (keys.tsx/app-header.tsx/tasks.md, 527 ins/6 del — already reviewed above) + `6ddbfc1` (docs-only, this same file, +103, the append that recorded the FAIL above). NOT pushed, no PR opened (`gh pr view`/`git status -sb` re-confirmed). Parent PR #17 still OPEN/MERGEABLE.
+**Mode**: Strict TDD. Adversarial, fresh-context — nothing taken on trust, including this session's own hand-off briefing (see Scope re-check below).
+
+### Trigger for this re-review
+
+The CRITICAL above (C1) was root-caused to `storage.ts`'s bare `catch {}` in `insertRequest`/`updateRequest`/`insertEvent` — a file outside this branch's diff (already established above). That bug now has an open fix: PR #18 (`fix/telemetry-silent-write-errors`, branch `fix/telemetry-silent-write-errors`, 1 commit `6823fb6` directly off `master`, confirmed via `git merge-base master fix/telemetry-silent-write-errors == rev-parse master`, OPEN/MERGEABLE per `gh pr view`, tests pass). This re-review determines whether C1 is resolved, downgraded, or still blocking, given the fix exists but is unmerged.
+
+### Scope re-check — confirmed unchanged, one hand-off discrepancy found
+
+`git diff feat/keys-admin-auth-infra..feat/keys-admin-ui-route --stat`: **6 files, 900 insertions(+), 6 deletions(-)** — `__tests__/ui-api-keys.spec.ts` (+168), `openspec/changes/api-key-admin-ui/tasks.md`, `openspec/changes/api-key-admin-ui/verify-report.md` (+103), `src/ui/src/components/layout/app-header.tsx`, `src/ui/src/lib/api.ts` (+102), `src/ui/src/routes/keys.tsx` (+520). Arithmetically exact: **900 = 797 (already-reviewed `63ac7b7`+`cf3e80a`, per the Diff/Commits section above) + 103 (`6ddbfc1`'s own append)**. Zero drift from the FAIL report's own numbers.
+
+**Discrepancy found, flagged for the record**: this session's hand-off briefing described the branch as "exactly 2 commits: `cf3e80a`, `6ddbfc1`," omitting `63ac7b7` entirely. Independently re-derived via `git log feat/keys-admin-auth-infra..feat/keys-admin-ui-route --oneline`: there are genuinely 3 commits ahead of base. This is **not** a new scope change — `63ac7b7` is the exact commit the FAIL round above already reviewed in full ("Code Reading — `api.ts` New Functions," confirmed clean) — it reads as an omission in this session's briefing text, not an actual branch mutation. Does not change any finding.
+
+### Working-tree cleanliness — clean, but a live contamination hazard was caught mid-session
+
+Session start: `git status --short` → only `?? .codegraph/`, as briefed. **Mid-session, two new untracked files appeared that were not present at the start**: `__tests__/storage-error-logging.spec.ts` and `scripts/README.md`. Neither is tracked; `git log --all -- <path>` for both returns zero commits anywhere in repo history — they are not part of PR #18 either (PR #18 is a single commit touching only `storage.ts`). Their content — regression tests literally named for "the silent-swallow incident," and a runbook note warning "Never run a second ad-hoc `bun src/index.ts` process against the same `logs/` directory as the live systemd service" — makes clear they belong to someone else's live, concurrent work on the PR #18 investigation, being written into this **same shared working directory** while this review was running. This is an operational hazard (shared git worktree across concurrent agent sessions), not a defect in PR3 or PR #18. Neither file was deleted or modified (out of this review's read-only scope) — isolated around them instead (see Tests below); both remain present, untouched, at end of session. Tracked files confirmed byte-identical to HEAD `6ddbfc1` throughout (`git diff HEAD --stat` empty, before and after isolation).
+
+### Fix verification — PR #18 read directly, not assumed
+
+`git diff master fix/telemetry-silent-write-errors -- src/observability/storage.ts` (single commit `6823fb6`): confirms all 3 call sites changed exactly as expected —
+- `insertEvent`: `catch {}` → `catch (err) { console.error("[storage.insertEvent] failed:", ...) }`, with an inline comment explaining why `console.error` and not `emit()` specifically: `emit()` lives in `logger.ts`, which itself calls `insertEvent()` — routing the failure back through `emit()` would recurse. Genuinely correct, deliberate anti-recursion design, not an oversight.
+- `insertRequest` / `updateRequest`: `catch {}` → `catch (err) { emit("error", "storage.insertRequest.failed", { traceId, error }) }` (and the `updateRequest` equivalent).
+This closes the exact mechanism C1 identified: a DB write failure is no longer invisible — it is now logged. Independently reasoned scope note: this fix makes failures *observable*; it does not eliminate the underlying *operational* cause (two processes contending for the same `logs/` directory) — but that cause was always out-of-scope for both PR3 and PR #18, and is now separately documented in the newly-appeared `scripts/README.md` (itself further evidence someone else is actively working this).
+
+### `keys.tsx` Per-Key Usage Column — re-read in full, source-level correctness confirmed independent of live traffic
+
+Re-read `src/ui/src/routes/keys.tsx` lines 76-259 (unchanged since the FAIL round above — confirmed via the empty `git diff HEAD`, so this is an independent re-read of the same bytes, not a rubber stamp):
+- `usageQuery` (`useQuery({queryKey:["keys-usage"], queryFn: getUsageByApiKey, refetchInterval: 15_000})`) calls the correct endpoint — `getUsageByApiKey()` → `GET /api/telemetry/usage` (`api.ts` L213-215), matching the spec's literal text ("GET /api/telemetry/usage (reusing getUsageByApiKey)").
+- `usageByKeyId` (L91-97) builds `Map<number, UsageByKey>`, explicitly guarding `row.api_key_id != null` before inserting.
+- `KeyRow` receives `usage={usageByKeyId.get(k.id)}` (L184) — correct join key, matching the spec's "matched by api_key_id."
+- Render (L223-234): `{usage ? (<>{usage.requests} req · {formatTokens(totalTokens)} tok</>) : (<span className="text-muted-foreground">—</span>)}` — a genuinely graceful empty-state: no usage row (exactly today's live condition) renders a `—` placeholder, not a crash, not a misleading `0`. `totalTokens` never dereferences `usage` when `undefined`.
+**This is genuinely correct, source-verifiable code, independent of whether traffic exists.** The CRITICAL was about runtime *proof*, not about this code being wrong.
+
+New positive evidence (not itemized as such above): `__tests__/ui-api-keys.spec.ts`'s `describe("getUsageByApiKey")` block (part of `63ac7b7`) is a genuine, passing, DOM-free unit test hitting the exact right URL and correctly parsing `api_key_id`/`requests`/`tokens_out` from a mocked response — proving the client **data-fetching** half of the requirement at the unit level. What remains unproven is only the DOM-rendering + real-data round trip, always assigned to Phase 7.2's manual verification under this project's own pre-approved, repo-wide DOM-testing carve-out (applies to all of `keys.tsx`, not uniquely the usage column).
+
+### Tests (isolated from the mid-session contamination)
+
+Raw `bun test` (contaminant files present): 456 pass / **4** fail / 460 total. 3 of the 4 failures are `storage — write-failure logging (silent-swallow regression)` tests from the untracked `storage-error-logging.spec.ts` — they fail because they assert `emit()`-based logging that only exists on the unmerged `fix/telemetry-silent-write-errors` branch, not on this branch's (correctly unfixed) `storage.ts`. Expected/correct given the file doesn't belong to this branch — not a regression.
+Isolated via `git stash push -u` (stashes `.codegraph/` + both contaminant files) → **455 pass / 1 fail / 456 total, 1229 expect() calls, 43 files, 32.46s** — an exact, digit-for-digit match to the FAIL round's own numbers above. The 1 failure is the same pre-existing `observability.spec.ts` `fuser`-missing sandbox flake. `git stash pop` immediately after restored the tree byte-identical (`git status --short` / `git diff HEAD --stat` confirmed identical before/after). **Zero regressions attributable to this branch's own commits.**
+`cd src/ui && bun run typecheck`: exit 0, zero errors, reproduced myself.
+Root `bunx tsc --noEmit`: same 7 pre-existing errors, same file/line/column (`transform-streaming-abort-signal.spec.ts`), unrelated to this change — consistent with all 3 prior units.
+
+### CRITICAL C1 — disposition: DOWNGRADED to WARNING (not resolved, not still-blocking)
+
+Reasoning:
+1. **Not a property of PR3's own code.** `storage.ts` has never been part of this branch's diff (confirmed by the FAIL round's own "Scope Check — CLEAN" and re-confirmed here).
+2. **The external bug is genuinely fixed**, in a separate, already-open PR — read its full diff directly rather than trusting a description: bare `catch {}` replaced with `emit()`/`console.error` logging, with a correct, deliberately-reasoned anti-recursion design.
+3. **PR3's own Usage Column code is independently source-verified correct**: right endpoint, right join key, graceful empty-state handling — testable, and passing, without any live traffic.
+4. **What genuinely remains open** is the full live/manual round-trip proof ("real traffic → real numbers visible in the rendered table") — always assigned to Phase 7.2 under this project's pre-approved DOM-testing carve-out (the entire `keys.tsx` route has zero DOM/React automated tests, by design) — and it cannot produce a true positive until PR #18 is merged (writes stop failing) and fresh traffic is generated.
+5. Therefore this is a **merge-order / deployment dependency**, not a PR3 implementation defect.
+
+**Disposition: (b) downgraded to WARNING** — "Per-Key Usage Column: source-verified correct; live-traffic proof still requires PR #18 merged + fresh traffic + a follow-up manual spot-check (Phase 7.2). Recommend merging/prioritizing PR #18 promptly and performing that spot-check afterward; does not block PR3's own merge."
+
+### Other prior issues — carried forward unchanged (tracked content unchanged since the FAIL round)
+
+- W1 (clear-key has no UI entry point) — still open, unaddressed; unchanged since the FAIL round (no file touching this changed).
+- W2 (diff ~2.25× the 400-line budget, now 900 lines including the docs-only append) — still valid; the increment since the FAIL round is documentation only, not code.
+- W3 (requests table silent failure affects Sessions/Live/Metrics too) — **substantially mitigated**: PR #18's fix lives in the shared `storage.ts`, so once merged it benefits every affected view, not just Keys. Still pending merge.
+- S1-S4 (tasks.md count, `postJson` test-coverage nuances, lint) — unchanged, still valid as minor, non-blocking suggestions.
+
+### New findings (this re-review)
+
+- **N1 (operational, not code)** — shared-working-directory contamination from a concurrent process/agent appeared mid-session (`storage-error-logging.spec.ts`, `scripts/README.md`, both untracked, neither in any commit anywhere). Not a PR3 or PR #18 defect; recommend `git worktree` isolation per concurrent session going forward to eliminate this class of hazard.
+- **N2 (hand-off accuracy)** — this session's briefing undercounted the branch's commits (said 2, actual 3). No functional impact — `63ac7b7` was already reviewed and passed in the FAIL round — flagging for hand-off accuracy only.
+- **N3 (positive)** — `getUsageByApiKey()`'s client-fetch layer has genuine, passing, dedicated unit-test coverage (`ui-api-keys.spec.ts`) supporting (without fully proving) the Usage Column requirement; not itemized as distinct evidence in the FAIL round.
+
+### Verdict
+
+**PASS WITH WARNINGS** — 0 CRITICAL (C1 downgraded per above), 3 WARNING (W1 carried, W2 carried, W3 mitigated-pending-merge), 4 SUGGESTION (S1-S4 carried) + 3 informational/operational findings (N1-N3), none blocking.
+
+Every independently-checkable claim in this re-review reproduced exactly: test counts identical to the FAIL round once mid-session contamination was isolated out (455/456, same flake), typecheck clean, scope unchanged and arithmetically exact (900 = 797+103), PR #18's fix read and confirmed correct at the source level. The original CRITICAL's own root-cause analysis ("outside this diff's 5 files") already pointed away from PR3; this re-review confirms the fix exists, is correct, and that PR3's own Usage Column code was never the problem — only the live proof of it was blocked, by an external, now-fixed-pending-merge cause.
+
+**next_recommended**: push `feat/keys-admin-ui-route` and open PR3 now. In parallel/beforehand, prioritize merging PR #18 (already open, tests pass, mergeable) so that once PR3 also merges, a follow-up manual spot-check (Phase 7.2: hit a `/v1/*` endpoint with a live key, `GET /api/telemetry/usage`, confirm `/keys` shows real numbers) can finally produce a true positive. That spot-check is a post-merge-of-both operational step, not a precondition for PR3's own merge. Also recommend: (a) investigate/clean up the concurrent-session contamination in this shared working directory (N1) before further automated verification runs in this pipeline, (b) correct the branch's commit count in future hand-offs (3, not 2).
