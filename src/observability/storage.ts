@@ -3,6 +3,12 @@ import type { SQLQueryBindings } from "bun:sqlite";
 import type { TelemetryEvent, RequestRecord, ApiKeyRecord, UsageByKey } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+// NOTE: two-file cycle — logger.ts imports insertEvent() from here, and we
+// import emit() from there. This is safe because both are hoisted function
+// declarations (initialised during ESM linking) and emit() is only referenced
+// inside call-time function bodies below, never at module-eval time. Do NOT
+// call emit() from insertEvent() — that would recurse (emit → insertEvent → …).
+import { emit } from "./logger.ts";
 
 let db: Database;
 
@@ -160,7 +166,12 @@ export function insertEvent(e: TelemetryEvent): void {
       e.ip ?? null,
       e.userAgent ?? null
     );
-  } catch {}
+  } catch (err) {
+    // Do NOT use emit() here: emit() calls insertEvent(), so routing this
+    // failure back through emit() would recurse. Fall back to a direct,
+    // non-recursive console.error (captured by systemd/journalctl in prod).
+    console.error("[storage.insertEvent] failed:", (err as Error).message);
+  }
 }
 
 export function insertRequest(r: RequestRecord): void {
@@ -187,7 +198,9 @@ export function insertRequest(r: RequestRecord): void {
       r.error ?? null,
       r.api_key_id ?? null
     );
-  } catch {}
+  } catch (err) {
+    emit("error", "storage.insertRequest.failed", { traceId: r.trace_id, error: (err as Error).message });
+  }
 }
 
 export function updateRequest(traceId: string, patch: Partial<RequestRecord>): void {
@@ -198,7 +211,9 @@ export function updateRequest(traceId: string, patch: Partial<RequestRecord>): v
     const set = fields.map((f) => `${f} = ?`).join(", ");
     const values = fields.map((f) => (patch as Record<string, unknown>)[f] ?? null);
     db.prepare(`UPDATE requests SET ${set} WHERE trace_id = ?`).run(...values as never[], traceId);
-  } catch {}
+  } catch (err) {
+    emit("error", "storage.updateRequest.failed", { traceId, error: (err as Error).message });
+  }
 }
 
 export interface EventFilters {
