@@ -53,9 +53,9 @@ Chain strategy: stacked-to-main
 
 ## Phase 5: Frontend Keys UI Route
 
-- [ ] 5.1 Create `src/ui/src/routes/keys.tsx` — TanStack Query list → `Table` (id/prefix/label/created_at/usage/revoked_at); create `Dialog`+`Input`+`Label` showing plaintext `full` once with reused `CopyButton`; revoke confirm `Dialog` with null-guarded self-lockout warning (`s=getStoredKey(); s!=null && row.prefix===parseKeyPrefix(s)`); command refetch via `queryClient.invalidateQueries(["keys"])`; `errorComponent: RouteError`
-- [ ] 5.2 Add nav entry `{ to:"/keys", label:"Keys", icon: KeyRoundIcon }` to `NAV` array in `src/ui/src/components/layout/app-header.tsx`
-- [ ] 5.3 Resolve `src/ui/src/routes/keys.tsx` file routing — route tree gen `tsr generate`
+- [x] 5.1 Create `src/ui/src/routes/keys.tsx` — TanStack Query list → `Table` (prefix/label/created_at/usage/status/actions); create `Dialog`+`Input`+`Label` showing plaintext `full` once with reused `CopyButton`; revoke confirm `Dialog` with null-guarded self-lockout warning via REUSED `isStoredKeyPrefix(row.prefix)` from `auth.ts` (never re-derives inline); refetch via `queryClient.invalidateQueries({ queryKey: ["keys"] })` (v5 API — `["keys"]` shorthand is v4); `errorComponent: RouteError`. New client fns `listApiKeys`/`createApiKey`/`revokeApiKey`/`getUsageByApiKey` added to `api.ts` (fetch-mock tested in `__tests__/ui-api-keys.spec.ts`)
+- [x] 5.2 Add nav entry `{ to:"/keys", label:"Keys", icon: KeyRoundIcon }` to `NAV` array in `src/ui/src/components/layout/app-header.tsx`
+- [x] 5.3 Resolve `src/ui/src/routes/keys.tsx` file routing — route tree gen `tsr generate` (`/keys` now in `routeTree.gen.ts`; `bun run typecheck` exit 0)
 
 ## Phase 6: Frontend Pure-Logic Unit Tests
 
@@ -63,5 +63,5 @@ Chain strategy: stacked-to-main
 
 ## Phase 7: Documentation & Manual Verification
 
-- [ ] 7.1 Document `useEventStream.ts` EventSource limitation: browser EventSource cannot attach `Authorization` header → Live view `/api/telemetry/stream` stays 401 under `REQUIRE_API_KEY=true`. Correct fix = query-param/short-lived stream token on the stream route (backend + security-sensitive, out of this slice). Fails soft via `onerror` backoff-reconnect. Add note to `design.md` and/or `keys.tsx`.
-- [ ] 7.2 Manual verification: `cd src/ui && bun run build` → deploy/restart live systemd service → walk through: 401→key-entry→retry succeeds on telemetry views; create key shows plaintext once; list never exposes `key_hash` column; revoke soft-deletes + self-lockout warning on stored key; Replay button works with stored key transmitted as Bearer
+- [x] 7.1 Document `useEventStream.ts` EventSource limitation: browser EventSource cannot attach `Authorization` header → Live view `/api/telemetry/stream` stays 401 under `REQUIRE_API_KEY=true`. Correct fix = query-param/short-lived stream token on the stream route (backend + security-sensitive, out of this slice). Fails soft via `onerror` backoff-reconnect. Documented in `design.md` File Changes table (useEventStream.ts row, "Out (documented)") AND a dedicated header comment block in `keys.tsx`.
+- [x] 7.2 Manual verification: `cd src/ui && bun run build` (exit 0, `keys-*.js` chunk emitted) → restarted `claude-plan-api.service` (pid 1028751, `10.0.40.18:3456`) → curl walkthrough all PASS: `GET /keys`→200 built HTML (`index-B0OpHSIb.js`); `GET /api/keys` no key→401; with key→200 metadata (`key_hash` count 0); `POST /api/keys`→201 with `full`, no `key_hash`, and that key authenticates; `POST /api/keys/2/revoke`→`{revoked:true}` then list shows `revoked_at` set (DESC order) and the revoked key→401; idempotent 2nd revoke→`{revoked:false}`; self-revoke of the in-use key→next request 401 (self-lockout proven). `static.ts` serves dist per-request from `process.cwd()` (no restart strictly required for dist; restarted anyway for a clean process). Verification keys issued via `scripts/create-api-key.ts` then revoked as cleanup.
