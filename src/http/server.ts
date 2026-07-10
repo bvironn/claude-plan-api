@@ -14,6 +14,7 @@ import {
   handleTelemetryExport,
   handleTelemetryUsage,
 } from "./routes/telemetry/index.ts";
+import { handleKeysList, handleKeysCreate, handleKeysRevoke } from "./routes/keys.ts";
 import { serveStatic, serveSpaFallback } from "./static.ts";
 import { withObservability } from "../observability/middleware.ts";
 import { emit } from "../observability/logger.ts";
@@ -82,6 +83,13 @@ export async function handleRequest(req: Request): Promise<Response> {
     if (method === "GET" && pathname === "/api/telemetry/requests") return await handleTelemetryRequests(req);
     if (method === "GET" && pathname.startsWith("/api/telemetry/requests/")) return await handleTelemetryRequestById(req);
     if (method === "GET" && pathname === "/api/telemetry/export") return await handleTelemetryExport(req);
+
+    // API key administration (list/create/revoke). Under the gated `/api/`
+    // prefix (inherits enforceApiKey) but NOT the telemetry SILENT prefix, so
+    // create/revoke write an attributed `requests` row.
+    if (method === "GET" && pathname === "/api/keys") return await handleKeysList(req);
+    if (method === "POST" && pathname === "/api/keys") return await handleKeysCreate(req);
+    if (method === "POST" && /^\/api\/keys\/[^/]+\/revoke$/.test(pathname)) return await handleKeysRevoke(req);
 
     // Static asset serving for the built UI. Only kicks in on GET; POST
     // and other verbs fall through to the 404 below.

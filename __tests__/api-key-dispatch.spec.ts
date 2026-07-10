@@ -204,6 +204,102 @@ describe("dispatch — enforcement ON: valid key authenticates + attributes", ()
 });
 
 // ---------------------------------------------------------------------------
+// REQUIRE_API_KEY=true → the NEW /api/keys admin surface is gated (task 3.3)
+// ---------------------------------------------------------------------------
+
+describe("dispatch — enforcement ON: /api/keys admin surface → 401 without a key", () => {
+  it("gates GET /api/keys (list) with no key → 401", async () => {
+    enable();
+    stubKeyLookup(null);
+    const res = await handleRequest(new Request("http://localhost/api/keys"));
+    expect(res.status).toBe(401);
+  });
+
+  it("gates POST /api/keys (create) with no key → 401 and never mints", async () => {
+    enable();
+    stubKeyLookup(null);
+    const ins = push(spyOn(storage, "insertApiKey").mockReturnValue(1));
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "x" }),
+      })
+    );
+
+    expect(res.status).toBe(401);
+    // The gate short-circuits before the handler → no key is minted.
+    expect(ins).not.toHaveBeenCalled();
+  });
+
+  it("gates POST /api/keys/:id/revoke with no key → 401 and never revokes", async () => {
+    enable();
+    stubKeyLookup(null);
+    const rev = push(spyOn(storage, "revokeApiKey").mockReturnValue(true));
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys/1/revoke", { method: "POST" })
+    );
+
+    expect(res.status).toBe(401);
+    expect(rev).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REQUIRE_API_KEY=true → /api/keys is WIRED: a valid key reaches the handlers
+// (proves task 2.4 dispatch wiring — without it these routes 404, not 200)
+// ---------------------------------------------------------------------------
+
+describe("dispatch — enforcement ON: /api/keys reaches its handlers with a valid key", () => {
+  it("GET /api/keys with a valid key → 200 { keys } from listApiKeys (route wired, not 404)", async () => {
+    enable();
+    stubKeyLookup(ACTIVE_KEY);
+    // /api/keys is NOT a SILENT prefix → withObservability writes a request row.
+    stubInsertRequest();
+    stubUpdateRequest();
+    const list = push(
+      spyOn(storage, "listApiKeys").mockReturnValue([
+        { id: 7, prefix: "cpk_deadbeef", label: "ci-runner", created_at: "2026-01-01T00:00:00Z", revoked_at: null },
+      ])
+    );
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys", {
+        headers: { Authorization: "Bearer cpk_deadbeef.good-secret" },
+      })
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { keys: Array<{ id: number; label: string }> };
+    expect(body.keys).toHaveLength(1);
+    expect(body.keys[0]!.id).toBe(7);
+    expect(body.keys[0]!.label).toBe("ci-runner");
+    expect(list).toHaveBeenCalled();
+  });
+
+  it("POST /api/keys/:id/revoke with a valid key → 200 { revoked } (route wired, forwards the id)", async () => {
+    enable();
+    stubKeyLookup(ACTIVE_KEY);
+    stubInsertRequest();
+    stubUpdateRequest();
+    const rev = push(spyOn(storage, "revokeApiKey").mockReturnValue(true));
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys/5/revoke", {
+        method: "POST",
+        headers: { Authorization: "Bearer cpk_deadbeef.good-secret" },
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revoked: true });
+    expect(rev).toHaveBeenCalledWith(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // REQUIRE_API_KEY=false (default) → dispatch is completely unchanged
 // ---------------------------------------------------------------------------
 
