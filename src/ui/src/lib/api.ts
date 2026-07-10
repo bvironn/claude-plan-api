@@ -34,6 +34,32 @@ async function getJson<T>(url: string): Promise<T> {
   return (await res.json()) as T
 }
 
+/**
+ * POST counterpart to `getJson`. Serializes an optional JSON `body`, attaches
+ * the same Bearer auth headers, and applies the identical 401 → typed-error
+ * contract so create/revoke share the key-entry recovery flow. `body` is
+ * omitted for bodyless POSTs (e.g. revoke), which skips the `Content-Type`.
+ */
+async function postJson<T>(url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...authHeaders(),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (res.status === 401) {
+    throw new UnauthorizedError()
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`POST ${url} failed: ${res.status} ${text.slice(0, 200)}`)
+  }
+  return (await res.json()) as T
+}
+
 function toQuery(params: Record<string, unknown>): string {
   const entries: string[] = []
   for (const [key, val] of Object.entries(params)) {
@@ -110,4 +136,80 @@ export function listLogs(filters: LogsFilters = {}): Promise<LogsResponse> {
 
 export function getMetrics(windowMs: number): Promise<Metrics> {
   return getJson<Metrics>(`/api/telemetry/metrics?window=${windowMs}`)
+}
+
+// ---------------------------------------------------------------------------
+// API keys (from /api/keys — metadata list, create, revoke)
+// ---------------------------------------------------------------------------
+// These mirror the backend DTOs. `key_hash` is NEVER present: the list route
+// selects an explicit column allowlist and the create route returns a literal
+// DTO, so the secret is structurally absent from every response the UI sees.
+
+/** Metadata-only projection of an `api_keys` row (never carries `key_hash`). */
+export interface ApiKeyMeta {
+  id: number
+  prefix: string
+  label: string
+  created_at: string
+  /** `null` means the key is active; an ISO timestamp means revoked. */
+  revoked_at: string | null
+}
+
+export interface ApiKeyListResponse {
+  keys: ApiKeyMeta[]
+}
+
+/**
+ * Create response — the ONLY place the plaintext key (`full`) is ever
+ * returned. It is shown to the operator once and never retrievable again.
+ */
+export interface CreatedApiKey {
+  id: number
+  prefix: string
+  label: string
+  created_at: string
+  full: string
+}
+
+export function listApiKeys(): Promise<ApiKeyListResponse> {
+  return getJson<ApiKeyListResponse>("/api/keys")
+}
+
+export function createApiKey(label: string): Promise<CreatedApiKey> {
+  return postJson<CreatedApiKey>("/api/keys", { label })
+}
+
+export function revokeApiKey(id: number): Promise<{ revoked: boolean }> {
+  return postJson<{ revoked: boolean }>(`/api/keys/${id}/revoke`)
+}
+
+// ---------------------------------------------------------------------------
+// Per-key usage (from /api/telemetry/usage)
+// ---------------------------------------------------------------------------
+
+/** One aggregated usage row per attributed `api_key_id`. */
+export interface UsageByKey {
+  api_key_id: number | null
+  prefix: string | null
+  label: string | null
+  requests: number
+  tokens_in: number
+  tokens_out: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+export interface UsageResponse {
+  generated_at: string
+  time_from: string | null
+  time_to: string | null
+  keys: UsageByKey[]
+}
+
+/**
+ * Fetch per-API-key usage totals. The `/keys` table joins these to each key by
+ * `api_key_id` to render a usage column.
+ */
+export function getUsageByApiKey(): Promise<UsageResponse> {
+  return getJson<UsageResponse>("/api/telemetry/usage")
 }
