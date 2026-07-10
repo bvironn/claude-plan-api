@@ -218,3 +218,50 @@ describe("guard — enforceApiKey: admin-scoped /api/* gating", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fail-closed boundary: /api/* passes ONLY on a strict is_admin === 1. Anything
+// else is denied (R3-004). The column is `INTEGER NOT NULL DEFAULT 0` with NO
+// CHECK constraint, so bun:sqlite CAN read back an integer other than 0/1 if a
+// row were ever written that way — the guard must not assume the field is a
+// clean boolean. `=== 1` (not truthiness, not `!= 0`) is what makes it
+// fail-closed: only an explicit admin marker unlocks the dashboard.
+// ---------------------------------------------------------------------------
+
+describe("guard — enforceApiKey: /api/* is fail-closed on strict is_admin === 1", () => {
+  const keyWithAdmin = (value: number): ApiKeyRecord => ({
+    id: 42,
+    prefix: "cpk_boundary",
+    key_hash: "stored-digest-boundary",
+    label: "boundary",
+    created_at: "2026-01-01T00:00:00Z",
+    revoked_at: null,
+    is_admin: value,
+  });
+
+  it("is_admin: 0 → 403 on /api/* (baseline non-admin, confirmed)", () => {
+    enable();
+    stubKeyLookup(keyWithAdmin(0));
+    const res = enforceApiKey(req("/api/keys", { Authorization: "Bearer cpk_boundary.good" }));
+    expect(res!.status).toBe(403);
+  });
+
+  it("is_admin: 2 (any non-1 integer) → 403 on /api/* — strict equality fails closed", () => {
+    enable();
+    stubKeyLookup(keyWithAdmin(2));
+    const request = req("/api/keys", { Authorization: "Bearer cpk_boundary.good" });
+    const res = enforceApiKey(request);
+    // 2 is truthy and != 0, yet still denied — proves the check is `=== 1`.
+    expect(res!.status).toBe(403);
+    // Denied requests are never attributed.
+    expect(getRequestKeyId(request)).toBeUndefined();
+  });
+
+  it("is_admin: 1 → passes /api/* (the ONLY value that unlocks the dashboard)", () => {
+    enable();
+    stubKeyLookup(keyWithAdmin(1));
+    const request = req("/api/keys", { Authorization: "Bearer cpk_boundary.good" });
+    expect(enforceApiKey(request)).toBeNull();
+    expect(getRequestKeyId(request)).toBe(42);
+  });
+});

@@ -262,14 +262,16 @@ describe("dispatch — enforcement ON: /api/keys admin surface → 401 without a
 });
 
 // ---------------------------------------------------------------------------
-// REQUIRE_API_KEY=true → /api/keys is WIRED: a valid key reaches the handlers
-// (proves task 2.4 dispatch wiring — without it these routes 404, not 200)
+// REQUIRE_API_KEY=true → /api/keys is WIRED: a valid ADMIN key reaches the
+// handlers (proves task 2.4 dispatch wiring — without it these routes 404, not
+// 200). NOTE (R3-006): ACTIVE_KEY is is_admin:1 ON PURPOSE — post admin-gate,
+// only an ADMIN key reaches an /api/* handler; a non-admin key would 403 here.
 // ---------------------------------------------------------------------------
 
-describe("dispatch — enforcement ON: /api/keys reaches its handlers with a valid key", () => {
-  it("GET /api/keys with a valid key → 200 { keys } from listApiKeys (route wired, not 404)", async () => {
+describe("dispatch — enforcement ON: /api/keys reaches its handlers with a valid ADMIN key", () => {
+  it("GET /api/keys with a valid ADMIN key → 200 { keys } from listApiKeys (route wired, not 404)", async () => {
     enable();
-    stubKeyLookup(ACTIVE_KEY);
+    stubKeyLookup(ACTIVE_KEY); // ADMIN key (is_admin: 1) — required to pass the /api/* gate.
     // /api/keys is NOT a SILENT prefix → withObservability writes a request row.
     stubInsertRequest();
     stubUpdateRequest();
@@ -293,9 +295,9 @@ describe("dispatch — enforcement ON: /api/keys reaches its handlers with a val
     expect(list).toHaveBeenCalled();
   });
 
-  it("POST /api/keys/:id/revoke with a valid key → 200 { revoked } (route wired, forwards the id)", async () => {
+  it("POST /api/keys/:id/revoke with a valid ADMIN key → 200 { revoked } (route wired, forwards the id)", async () => {
     enable();
-    stubKeyLookup(ACTIVE_KEY);
+    stubKeyLookup(ACTIVE_KEY); // ADMIN key (is_admin: 1) — required to pass the /api/* gate.
     stubInsertRequest();
     stubUpdateRequest();
     const rev = push(spyOn(storage, "revokeApiKey").mockReturnValue(true));
@@ -428,4 +430,53 @@ describe("dispatch — enforcement ON: admin-scoped /api/* gating", () => {
     // No presented key → the store is never even consulted.
     expect(lookup).not.toHaveBeenCalled();
   });
+
+  it("/api/keys/:id/revoke returns 403 for a valid NON-admin key and never revokes (R3-003)", async () => {
+    enable();
+    stubKeyLookup(NON_ADMIN_KEY);
+    const rev = push(spyOn(storage, "revokeApiKey").mockReturnValue(true));
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys/5/revoke", {
+        method: "POST",
+        headers: { Authorization: "Bearer cpk_teammate.good-secret" },
+      })
+    );
+
+    expect(res.status).toBe(403);
+    // Gate short-circuits before dispatch → no revoke happens.
+    expect(rev).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The admin gate is PREFIX-based across the whole /api/* surface (R3-002) —
+// not accidentally scoped to just the /api/keys routes. Several of these paths
+// (telemetry usage/logs/metrics) carry full prompt/response bodies, which is
+// exactly why a non-admin key must be forbidden from ALL of them, not just key
+// management. The gate runs before dispatch, so no per-route handler stubbing
+// is needed — a valid NON-admin key is refused at the guard.
+// ---------------------------------------------------------------------------
+
+describe("dispatch — enforcement ON: admin gate covers the whole /api/* prefix (not just /api/keys)", () => {
+  for (const path of [
+    "/api/telemetry/usage",
+    "/api/telemetry/logs",
+    "/api/telemetry/metrics",
+  ]) {
+    it(`403 for a valid NON-admin key on ${path} (proves prefix-based gating, not keys-only)`, async () => {
+      enable();
+      stubKeyLookup(NON_ADMIN_KEY);
+
+      const res = await handleRequest(
+        new Request(`http://localhost${path}`, {
+          headers: { Authorization: "Bearer cpk_teammate.good-secret" },
+        })
+      );
+
+      expect(res.status).toBe(403);
+      // Authorization failure on a valid key — never 401 here.
+      expect(res.status).not.toBe(401);
+    });
+  }
 });
