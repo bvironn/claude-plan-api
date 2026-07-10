@@ -44,6 +44,32 @@ export const MAX_CONSECUTIVE_TOOL_ERRORS = 2;
 export function isClaudeCodeIdentityEnabled(): boolean {
   return Bun.env.CLAUDE_CODE_IDENTITY === "true";
 }
+/**
+ * Whether inbound requests to gated JSON API routes (`/v1/*`, `/api/*`) must
+ * present a valid API key. OFF by default so existing callers keep working
+ * during the grace period; the operator flips `REQUIRE_API_KEY=true` after
+ * seeding keys with `scripts/create-api-key.ts`.
+ *
+ * Read at CALL TIME (not import time) on purpose — mirrors
+ * `isClaudeCodeIdentityEnabled()` — so a test or per-request override can flip
+ * enforcement without re-importing the module.
+ */
+export function isApiKeyRequired(): boolean {
+  return Bun.env.REQUIRE_API_KEY === "true";
+}
+
+/**
+ * Server-side secret mixed into the API-key digest (`HMAC-SHA256(pepper, key)`).
+ * Rotating it invalidates every issued key — a kill switch. Returns "" when
+ * unset; callers that require a key (issuance, enforcement) MUST fail fast on
+ * an empty pepper.
+ *
+ * Read at CALL TIME to match the rest of the API-key config surface.
+ */
+export function getApiKeyPepper(): string {
+  return Bun.env.API_KEY_PEPPER ?? "";
+}
+
 // Upper bound (ms) on how long we honour an upstream `retry-after` before
 // surfacing the error to the caller. Anthropic returns hour-scale values
 // when a Max subscription has exhausted its quota; without this cap the

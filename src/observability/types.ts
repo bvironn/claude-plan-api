@@ -41,6 +41,38 @@ export interface RequestRecord {
   response_body?: string;
   upstream_request_body?: string | null;
   error?: string;
+  // Advisory (app-enforced) reference to the issuing api_keys.id. NULL when
+  // authentication is disabled or the route is exempt.
+  api_key_id?: number;
+}
+
+/**
+ * A row in the `api_keys` table. Only the digest (`key_hash`) is persisted —
+ * never the plaintext secret. `revoked_at` NULL means the key is active.
+ */
+export interface ApiKeyRecord {
+  id?: number;
+  prefix: string;
+  key_hash: string;
+  label: string;
+  created_at: string;
+  revoked_at?: string | null;
+}
+
+/**
+ * Aggregated per-key usage produced by `getUsageByApiKey()`: one row per
+ * attributed `api_key_id`, joined to its `api_keys` metadata, with request
+ * count and summed token columns for the queried time window.
+ */
+export interface UsageByKey {
+  api_key_id: number | null;
+  prefix: string | null;
+  label: string | null;
+  requests: number;
+  tokens_in: number;
+  tokens_out: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
 }
 
 export interface TraceContext {

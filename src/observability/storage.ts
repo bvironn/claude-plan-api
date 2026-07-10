@@ -1,13 +1,23 @@
 import { Database } from "bun:sqlite";
 import type { SQLQueryBindings } from "bun:sqlite";
-import type { TelemetryEvent, RequestRecord } from "./types.ts";
+import type { TelemetryEvent, RequestRecord, ApiKeyRecord, UsageByKey } from "./types.ts";
 import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 let db: Database;
 
-export function initStorage(): void {
-  mkdirSync("logs", { recursive: true });
-  db = new Database("logs/telemetry.db");
+/**
+ * Open (or create) the telemetry SQLite database and ensure the schema.
+ *
+ * `dbPath` defaults to the on-disk `logs/telemetry.db`. Pass `":memory:"` for
+ * deterministic, isolated tests (no disk I/O). Any other path is treated as a
+ * file and its parent directory is created.
+ */
+export function initStorage(dbPath: string = "logs/telemetry.db"): void {
+  if (dbPath !== ":memory:") {
+    mkdirSync(dirname(dbPath), { recursive: true });
+  }
+  db = new Database(dbPath);
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -57,17 +67,31 @@ export function initStorage(): void {
       request_body TEXT,
       response_body TEXT,
       upstream_request_body TEXT,
-      error TEXT
+      error TEXT,
+      api_key_id INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
     CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
     CREATE INDEX IF NOT EXISTS idx_requests_path ON requests(path);
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      prefix TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      revoked_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);
   `);
 
   // Idempotent additive migrations for DBs created before a column existed.
   // Pattern: check PRAGMA table_info, ALTER TABLE ADD COLUMN if missing.
   // Safe to call on every startup — no-op on fresh DBs (column already in CREATE).
   ensureColumn("requests", "upstream_request_body", "TEXT");
+  ensureColumn("requests", "api_key_id", "INTEGER");
+  // Index must be created AFTER ensureColumn so pre-existing DBs have the column.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id)");
 }
 
 /**
@@ -104,13 +128,13 @@ function getInsertRequest() {
     string, string, string | null, string | null, number | null, number | null,
     string | null, string | null, string | null, number | null, number | null,
     number | null, number | null, number | null, string | null, string | null,
-    string | null, string | null
+    string | null, string | null, number | null
   ]>(`
     INSERT OR IGNORE INTO requests
       (trace_id, timestamp, method, path, status, duration_ms, ip, user_agent, model,
        is_stream, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-       request_body, response_body, upstream_request_body, error)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       request_body, response_body, upstream_request_body, error, api_key_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
 }
 
@@ -160,7 +184,8 @@ export function insertRequest(r: RequestRecord): void {
       r.request_body ?? null,
       r.response_body ?? null,
       r.upstream_request_body ?? null,
-      r.error ?? null
+      r.error ?? null,
+      r.api_key_id ?? null
     );
   } catch {}
 }
@@ -321,6 +346,74 @@ export function queryRequestsRaw(filters: RequestFilters = {}): RequestRecord[] 
 export function getRequestByTrace(traceId: string): RequestRecord | null {
   if (!db) return null;
   return db.query<RequestRecord, [string]>("SELECT * FROM requests WHERE trace_id = ?").get(traceId) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// API keys
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist a new API key row. Only the digest (`key_hash`) is stored — the
+ * plaintext secret is never written. Returns the generated `id`.
+ *
+ * Unlike the telemetry inserts, this does NOT swallow errors: a duplicate
+ * `key_hash` (UNIQUE) or other failure must surface to the issuing CLI.
+ */
+export function insertApiKey(rec: ApiKeyRecord): number {
+  if (!db) return 0;
+  const res = db.prepare<void, [string, string, string, string, string | null]>(`
+    INSERT INTO api_keys (prefix, key_hash, label, created_at, revoked_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(rec.prefix, rec.key_hash, rec.label, rec.created_at, rec.revoked_at ?? null);
+  return Number(res.lastInsertRowid);
+}
+
+/**
+ * Look up an ACTIVE key by its digest. Returns the row only when the hash
+ * matches and the key is not revoked (`revoked_at IS NULL`); otherwise null.
+ */
+export function getApiKeyByHash(hash: string): ApiKeyRecord | null {
+  if (!db) return null;
+  return db.query<ApiKeyRecord, [string]>(
+    "SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL"
+  ).get(hash) ?? null;
+}
+
+export interface UsageFilters {
+  timeFrom?: string;
+  timeTo?: string;
+}
+
+/**
+ * Aggregate per-key usage from the `requests` table: request count and summed
+ * token columns grouped by `api_key_id`, joined to `api_keys` for prefix/label.
+ * Only attributed rows (`api_key_id IS NOT NULL`) are included. An optional
+ * `timeFrom`/`timeTo` window bounds the rows. Mirrors the `getMetrics()`
+ * `SUM(...)` idiom; returns `[]` (not an error) when nothing matches.
+ */
+export function getUsageByApiKey(filters: UsageFilters = {}): UsageByKey[] {
+  if (!db) return [];
+  const conds: string[] = ["r.api_key_id IS NOT NULL"];
+  const vals: SQLQueryBindings[] = [];
+  if (filters.timeFrom) { conds.push("r.timestamp >= ?"); vals.push(filters.timeFrom); }
+  if (filters.timeTo) { conds.push("r.timestamp <= ?"); vals.push(filters.timeTo); }
+  const where = `WHERE ${conds.join(" AND ")}`;
+  return db.query<UsageByKey, SQLQueryBindings[]>(`
+    SELECT
+      r.api_key_id AS api_key_id,
+      k.prefix AS prefix,
+      k.label AS label,
+      COUNT(*) AS requests,
+      COALESCE(SUM(r.input_tokens), 0) AS tokens_in,
+      COALESCE(SUM(r.output_tokens), 0) AS tokens_out,
+      COALESCE(SUM(r.cache_read_tokens), 0) AS cache_read_tokens,
+      COALESCE(SUM(r.cache_creation_tokens), 0) AS cache_creation_tokens
+    FROM requests r
+    LEFT JOIN api_keys k ON k.id = r.api_key_id
+    ${where}
+    GROUP BY r.api_key_id
+    ORDER BY r.api_key_id
+  `).all(...vals);
 }
 
 export interface Metrics {
