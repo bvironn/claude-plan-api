@@ -83,6 +83,60 @@ Event model and SQLite schema: [`OBSERVABILITY.md`](./OBSERVABILITY.md).
 The SQLite store at `logs/telemetry.db` is also directly queryable. No
 abstraction to learn, no ORM to fight.
 
+## Authentication
+
+Inbound requests to the JSON API — `/v1/*` (OpenAI-compat) and `/api/*`
+(telemetry) — can be gated behind per-member API keys. It is **off by default**:
+until an operator issues keys and flips the cutover flag, every caller passes,
+so existing setups keep working with zero changes. `GET /health`, `/`, and
+static assets are never gated.
+
+### Quick path
+
+1. **Set a server secret.** `API_KEY_PEPPER` is mixed into every key digest;
+   without it, keys can be neither issued nor verified.
+
+   ```bash
+   export API_KEY_PEPPER=$(openssl rand -hex 32)
+   ```
+
+2. **Issue a key.** The plaintext is printed exactly once — only its hash is
+   stored.
+
+   ```bash
+   bun scripts/create-api-key.ts "alice-laptop"
+   # → cpk_1a2b3c4d.<secret>
+   ```
+
+3. **Present the key** on any gated request, via either header:
+
+   ```bash
+   curl -H "Authorization: Bearer cpk_1a2b3c4d.<secret>" \
+     http://127.0.0.1:3456/v1/models
+   # …or…
+   curl -H "X-API-Key: cpk_1a2b3c4d.<secret>" \
+     http://127.0.0.1:3456/v1/models
+   ```
+
+4. **Turn enforcement on** once every caller has a key:
+
+   ```bash
+   REQUIRE_API_KEY=true bun run src/index.ts
+   ```
+
+### Details
+
+| Topic | Behaviour |
+| --- | --- |
+| Cutover flag | `REQUIRE_API_KEY` (default `false`). While `false` the gateway checks no keys at all — issue keys first, flip last. |
+| Key format | `cpk_<prefix>.<secret>`. Only `HMAC-SHA256(API_KEY_PEPPER, key)` is persisted in the `api_keys` table; the secret is never stored and cannot be recovered. |
+| Header precedence | `Authorization: Bearer <key>` wins over `X-API-Key: <key>`. |
+| Rejected requests | On a gated route a missing, unknown, or revoked key gets `401` with a `WWW-Authenticate: Bearer` header, before any route or telemetry write runs. |
+| Rotating the pepper | Changing `API_KEY_PEPPER` invalidates every issued key at once — a kill switch. |
+
+Each authenticated request is attributed to its issuing key; per-key usage is
+exposed at `GET /api/telemetry/usage`.
+
 ## Dashboard
 
 All routes are URL-driven and shareable. A dashboard without keyboard nav is
@@ -191,6 +245,8 @@ Strict TDD for behavioural changes (see [`CLAUDE.md`](./CLAUDE.md)); `bun test` 
 | `ANTHROPIC_CLI_VERSION` | string | `2.1.112` | CLI version reported in user-agent and billing header. MUST match an Anthropic-recognised Claude Code release; unrecognised versions trigger safety policies (including redacted thinking). |
 | `MAX_RETRY_AFTER_MS` | integer (ms) | `30000` | Upper bound on honoured upstream `retry-after`. Anthropic returns hour-scale values when a Max quota is exhausted; this cap prevents the proxy from hanging indefinitely. |
 | `CLAUDE_CODE_IDENTITY` | boolean | `false` | Inject the official `"You are Claude Code, Anthropic's official CLI for Claude."` identity block into `system[]`. **Off by default** (neutral voice — best for general chat UIs). Set `true` to make the model identify/behave as the Claude Code CLI. Does **not** affect the mandatory billing header. See the callout below. |
+| `REQUIRE_API_KEY` | boolean | `false` | Cutover flag for inbound API-key enforcement. While `false` (default) the gateway checks no keys and every caller passes, so existing setups keep working. Set `true` — after issuing keys with `scripts/create-api-key.ts` — to require a valid key on gated routes (`/v1/*`, `/api/*`). See [§Authentication](#authentication). |
+| `API_KEY_PEPPER` | string | `""` (unset) | Server-side secret mixed into every key digest (`HMAC-SHA256(pepper, key)`). Required to issue **or** verify keys — issuance and verification fail when empty. Rotating it invalidates every issued key at once (kill switch). |
 
 > ### ⚠️ `CLAUDE_CODE_IDENTITY` — check this first if requests start failing
 >
@@ -214,7 +270,9 @@ Anthropic exposes two thinking contracts on the same endpoint: `enabled`
 
 Not production-ready in the enterprise sense. Not audited for security. Not
 supported by Anthropic. Not multi-tenant — it reads credentials from disk and
-uses them. Not a replacement for a real API key if your workload needs SLA.
+uses them. Per-member API keys can now gate the JSON API (see
+[§Authentication](#authentication)), but the gateway still carries no SLA — keep
+latency- or uptime-critical workloads off it.
 
 It is a tool for people who want to see, in full colour, what their LLM is
 doing on a Claude Max subscription, today.

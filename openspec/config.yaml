@@ -5,7 +5,7 @@ context: |
   Runtime: Bun (bun:test, Bun.serve, bun:sqlite)
   Language: TypeScript (strict ESNext, moduleResolution: bundler)
   Architecture: Hexagonal-lite — domain/, http/routes/, upstream/, transform/, observability/
-  Testing: bun test — 409/409 pass (0 fail); type-check via `bun run tsc --noEmit`
+  Testing: bun test — 422/422 pass (0 fail); type-check via `bun run tsc --noEmit`
   Conventions: CLAUDE.md mandates Bun over Node; no express/jest/vitest; pino for logging
 
 strict_tdd: true
