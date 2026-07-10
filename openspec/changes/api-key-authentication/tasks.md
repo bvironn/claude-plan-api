@@ -54,9 +54,9 @@ Chain strategy: pending
 
 ## Phase 4: Documentation
 
-- [ ] 4.1 Update README.md Configuration table: add `REQUIRE_API_KEY` and `API_KEY_PEPPER` rows (name, type, default, purpose)
-- [ ] 4.2 Add API auth section to README: issuance via `scripts/create-api-key.ts`, `Authorization: Bearer` / `X-API-Key` usage, `REQUIRE_API_KEY` flag (default false)
-- [ ] 4.3 Remove or update the stale "not a replacement for a real API key" disclaimer line implying zero request auth
+- [x] 4.1 Update README.md Configuration table: add `REQUIRE_API_KEY` and `API_KEY_PEPPER` rows (name, type, default, purpose)
+- [x] 4.2 Add API auth section to README: issuance via `scripts/create-api-key.ts`, `Authorization: Bearer` / `X-API-Key` usage, `REQUIRE_API_KEY` flag (default false)
+- [x] 4.3 Remove or update the stale "not a replacement for a real API key" disclaimer line implying zero request auth
 
 ---
 
