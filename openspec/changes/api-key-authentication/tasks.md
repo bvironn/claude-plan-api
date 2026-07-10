@@ -45,12 +45,12 @@ Chain strategy: pending
 
 ## Phase 3: Integration — Wiring, CLI, Route
 
-- [ ] 3.1 Export `handleRequest(req)` from `src/http/server.ts`; wire `enforceApiKey` as first statement in `fetch()` try-block (before existing routes)
-- [ ] 3.2 Register `/api/telemetry/usage` route in server.ts calling `handleTelemetryUsage`
-- [ ] 3.3 Export `handleTelemetryUsage` from `src/http/routes/telemetry/index.ts`
-- [ ] 3.4 Create `src/http/routes/telemetry/usage.ts`: GET handler returning per-key aggregated usage with timeFrom/timeTo; wrapped with `withObservability`
-- [ ] 3.5 Create `scripts/create-api-key.ts`: call `initStorage()` before storage usage, fail-fast if `API_KEY_PEPPER` is missing/empty, generate key → hash → `insertApiKey` → print full `prefix.secret` once
-- [ ] 3.6 Extend dispatch-level integration test (pattern from `__tests__/observability.spec.ts`): import `handleRequest`; test 401 on gated routes, 200 on exempt, valid key pass, `REQUIRE_API_KEY=false` bypass, telemetry route also gated
+- [x] 3.1 Export `handleRequest(req)` from `src/http/server.ts`; wire `enforceApiKey` as first statement in `fetch()` try-block (before existing routes). Also wired attribution: `src/observability/middleware.ts` now sets `api_key_id: getRequestKeyId(req)` on `insertRequest` (design File Changes row; required for Per-Request Key Attribution)
+- [x] 3.2 Register `/api/telemetry/usage` route in server.ts calling `handleTelemetryUsage`
+- [x] 3.3 Export `handleTelemetryUsage` from `src/http/routes/telemetry/index.ts`
+- [x] 3.4 Create `src/http/routes/telemetry/usage.ts`: GET handler returning per-key aggregated usage with timeFrom/timeTo; wrapped with `withObservability`
+- [x] 3.5 Create `scripts/create-api-key.ts`: call `initStorage()` before storage usage, fail-fast if `API_KEY_PEPPER` is missing/empty, generate key → hash → `insertApiKey` → print full `prefix.secret` once
+- [x] 3.6 Extend dispatch-level integration test (pattern from `__tests__/observability.spec.ts`): import `handleRequest`; test 401 on gated routes, 200 on exempt, valid key pass, `REQUIRE_API_KEY=false` bypass, telemetry route also gated
 
 ## Phase 4: Documentation
 

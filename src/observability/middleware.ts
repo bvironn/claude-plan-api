@@ -2,6 +2,7 @@ import { emit } from "./logger.ts";
 import { insertRequest, updateRequest } from "./storage.ts";
 import { newTraceId, runWithTrace } from "./tracer.ts";
 import { SESSION_ID } from "../session.ts";
+import { getRequestKeyId } from "../domain/api-keys.ts";
 import type { TraceContext } from "./types.ts";
 
 const SILENT_PATH_PREFIXES = ["/api/telemetry"];
@@ -54,6 +55,12 @@ export function withObservability(
         ip,
         user_agent: userAgent,
         request_body: bodyText,
+        // Attribution transport (design decision #5): the pre-dispatch guard
+        // stashed the validated api_keys.id on this same `req` identity via a
+        // WeakMap. Read it back here so the logged row is attributed to the
+        // issuing key. `undefined` (→ NULL) when auth is off or the route is
+        // exempt.
+        api_key_id: getRequestKeyId(req),
       });
 
       try {
