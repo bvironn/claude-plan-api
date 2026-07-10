@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import type { SQLQueryBindings } from "bun:sqlite";
-import type { TelemetryEvent, RequestRecord, ApiKeyRecord, UsageByKey } from "./types.ts";
+import type { TelemetryEvent, RequestRecord, ApiKeyRecord, ApiKeyMeta, UsageByKey } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -377,6 +377,37 @@ export function getApiKeyByHash(hash: string): ApiKeyRecord | null {
   return db.query<ApiKeyRecord, [string]>(
     "SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL"
   ).get(hash) ?? null;
+}
+
+/**
+ * List all keys as metadata only, newest first. SELECTs an explicit column
+ * allowlist — NEVER `SELECT *` — so `key_hash` (or any future secret column)
+ * is structurally impossible to leak through this path. Returns both active
+ * and revoked keys (the admin UI shows `revoked_at`); `[]` before init.
+ */
+export function listApiKeys(): ApiKeyMeta[] {
+  if (!db) return [];
+  return db.query<ApiKeyMeta, []>(
+    `SELECT id, prefix, label, created_at, revoked_at
+     FROM api_keys ORDER BY created_at DESC`
+  ).all();
+}
+
+/**
+ * Idempotent soft-revoke: stamp `revoked_at` on an ACTIVE key. Returns `true`
+ * iff a row transitioned active→revoked (the `revoked_at IS NULL` guard makes
+ * the UPDATE affect exactly the still-active row). A second revoke, or an
+ * unknown id, changes nothing and returns `false` — a successful no-op, not an
+ * error (spec: revoke is idempotent). A revoked key immediately fails
+ * `getApiKeyByHash`'s active-only lookup.
+ */
+export function revokeApiKey(id: number): boolean {
+  if (!db) return false;
+  const res = db.prepare<void, [string, number]>(
+    `UPDATE api_keys SET revoked_at = ?
+     WHERE id = ? AND revoked_at IS NULL`
+  ).run(new Date().toISOString(), id);
+  return res.changes > 0;
 }
 
 export interface UsageFilters {

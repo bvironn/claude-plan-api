@@ -6,6 +6,8 @@ import {
   insertApiKey,
   getApiKeyByHash,
   getUsageByApiKey,
+  listApiKeys,
+  revokeApiKey,
 } from "../src/observability/storage.ts";
 
 // Every test runs against a fresh in-memory DB → deterministic, isolated,
@@ -146,5 +148,75 @@ describe("storage — getUsageByApiKey aggregation", () => {
   it("returns an empty array (not an error) when no rows match the window", () => {
     const usage = getUsageByApiKey({ timeFrom: "2030-01-01T00:00:00Z", timeTo: "2030-12-31T00:00:00Z" });
     expect(usage).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listApiKeys — metadata only (never key_hash), DESC by created_at (tasks 1.1, 1.2, 3.1)
+// ---------------------------------------------------------------------------
+
+describe("storage — listApiKeys (metadata only, DESC)", () => {
+  it("returns exactly the metadata columns and NEVER key_hash for every row", () => {
+    insertApiKey({ prefix: "cpk_a", key_hash: "secret-hash-a", label: "alice", created_at: "2026-01-01T00:00:00Z" });
+    insertApiKey({ prefix: "cpk_b", key_hash: "secret-hash-b", label: "bob", created_at: "2026-01-02T00:00:00Z" });
+
+    const rows = listApiKeys();
+
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      // Explicit-column SELECT → the row object has exactly the DTO keys and no
+      // secret. This is the structural guarantee against a `SELECT *` leak.
+      expect(Object.keys(row).sort()).toEqual(["created_at", "id", "label", "prefix", "revoked_at"]);
+      expect("key_hash" in row).toBe(false);
+    }
+  });
+
+  it("orders rows by created_at DESC (newest first), independent of insert order", () => {
+    insertApiKey({ prefix: "cpk_old", key_hash: "h-old", label: "old", created_at: "2026-01-01T00:00:00Z" });
+    insertApiKey({ prefix: "cpk_new", key_hash: "h-new", label: "new", created_at: "2026-03-01T00:00:00Z" });
+    insertApiKey({ prefix: "cpk_mid", key_hash: "h-mid", label: "mid", created_at: "2026-02-01T00:00:00Z" });
+
+    const labels = listApiKeys().map((r) => r.label);
+    expect(labels).toEqual(["new", "mid", "old"]);
+  });
+
+  it("includes revoked keys with revoked_at populated (list is NOT active-only)", () => {
+    insertApiKey({ prefix: "cpk_r", key_hash: "h-r", label: "revoked", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z" });
+    const rows = listApiKeys();
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.revoked_at).toBe("2026-02-01T00:00:00Z");
+  });
+
+  it("returns an empty array when no keys exist", () => {
+    expect(listApiKeys()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// revokeApiKey — idempotent soft-revoke, returns boolean (tasks 1.3, 3.1)
+// ---------------------------------------------------------------------------
+
+describe("storage — revokeApiKey (idempotent soft-revoke)", () => {
+  it("transitions an active key active→revoked, returns true, and deactivates it for auth", () => {
+    insertApiKey({ prefix: "cpk_x", key_hash: "hash-x", label: "x", created_at: "2026-01-01T00:00:00Z" });
+    // Active before revoke — the active-only lookup finds it.
+    expect(getApiKeyByHash("hash-x")).not.toBeNull();
+
+    const first = revokeApiKey(1);
+
+    expect(first).toBe(true);
+    // Active-only lookup now rejects it → enforceApiKey would 401 (spec scenario).
+    expect(getApiKeyByHash("hash-x")).toBeNull();
+  });
+
+  it("is an idempotent no-op on the second call (already revoked → false)", () => {
+    insertApiKey({ prefix: "cpk_x", key_hash: "hash-x", label: "x", created_at: "2026-01-01T00:00:00Z" });
+    expect(revokeApiKey(1)).toBe(true);
+    expect(revokeApiKey(1)).toBe(false);
+  });
+
+  it("returns false for an unknown id (no row transitions)", () => {
+    insertApiKey({ prefix: "cpk_x", key_hash: "hash-x", label: "x", created_at: "2026-01-01T00:00:00Z" });
+    expect(revokeApiKey(999)).toBe(false);
   });
 });

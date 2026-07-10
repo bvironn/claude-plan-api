@@ -60,6 +60,20 @@ export interface ApiKeyRecord {
 }
 
 /**
+ * Metadata-only projection of an `api_keys` row, safe to expose over HTTP.
+ * Deliberately OMITS `key_hash` (and any plaintext) so a handler that returns
+ * an `ApiKeyMeta` cannot leak a secret. `listApiKeys()` SELECTs exactly these
+ * columns; `revoked_at` NULL means the key is active.
+ */
+export interface ApiKeyMeta {
+  id: number;
+  prefix: string;
+  label: string;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+/**
  * Aggregated per-key usage produced by `getUsageByApiKey()`: one row per
  * attributed `api_key_id`, joined to its `api_keys` metadata, with request
  * count and summed token columns for the queried time window.
