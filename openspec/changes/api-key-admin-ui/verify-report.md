@@ -672,3 +672,106 @@ src/ui/src/routes/__root.tsx
 All 6 in-scope tasks (Phase 4.1-4.5, 6.1) are genuinely complete: read every changed/created file in full and independently re-derived every claim from source, `git diff`, and real command execution — nothing taken on trust from the apply report. The self-lockout null-guard (`isStoredKeyPrefix`) was traced precisely and is genuinely, defensively correct at two layers (never throws on no-key-stored or storage-absent). `replay()`'s deletion was re-confirmed safe via three independent, non-overlapping grep strategies (zero callers, now and before). The `QueryCache`/retry TanStack Query v5 usage was cross-checked against official docs via Context7 and is valid, current, idiomatic API — not a hallucinated pattern. All 10 new tests are genuine, well-triangulated, and independently re-executed (10/10 pass in isolation). Lint findings were checked against a `git stash`-isolated clean baseline and are 3/4 pre-existing debt plus exactly 1 new same-class instance — not a new category of problem. Zero hallucinations across every checked claim. Scope is clean — no `src/http/**` or `storage.ts` touched, `tasks.md`'s diff is pure checkbox bookkeeping. The one substantive nuance for the orchestrator to carry forward: none of `dashboard-auth`'s 5 spec scenarios have full runtime/DOM proof yet (W1) — that is Phase 7's explicit, pre-approved job, not a gap in this unit.
 
 **next_recommended**: proceed to Unit 3 apply (Keys UI route + nav + Phase 7 manual verification), which is also where the spec's outstanding runtime-proof gap (W1) gets closed and where S2/S3 (clear-key UI ownership, reusing `isStoredKeyPrefix`) should be actively considered rather than re-derived from scratch.
+
+---
+
+## Verification Report — Unit 3 / PR 3 ("Keys UI route + manual verification") — FINAL UNIT
+
+**Change**: api-key-admin-ui
+**Unit**: 3 of 3 (FINAL). Branch `feat/keys-admin-ui-route` off `feat/keys-admin-auth-infra` HEAD `861abd4` — confirmed identical via `git rev-parse feat/keys-admin-auth-infra` = `861abd4` = `HEAD~2`. Unlike Units 1-2 (uncommitted working-tree state), this unit has **2 real local commits** (`63ac7b7`, `cf3e80a`) — NOT pushed, no PR opened (`gh pr view feat/keys-admin-ui-route` → "no pull requests found"; `git status -sb` shows no upstream tracking). Parent PR #17 confirmed OPEN/unmerged via `gh pr list`.
+**Mode**: Strict TDD. Adversarial fresh-context review — every claim independently re-derived from source, git history, the live systemd journal, and a direct read-only SQLite query of the production DB file. Nothing taken on trust from the apply report.
+
+### Diff / Commits (independently confirmed)
+
+`git diff 861abd4..HEAD --stat`: **5 files changed, 797 insertions(+), 6 deletions(-) = 803 total changed lines** — matches the claimed "~803" essentially exactly. Two commits: `63ac7b7` (api.ts +102, ui-api-keys.spec.ts +168 = 270, pure addition, 0 deletions) + `cf3e80a` (keys.tsx +520 new file, app-header.tsx 3 changed lines, tasks.md 10 changed lines = 527 ins/6 del). The `size:exception` (~2× the 400-line budget even after 3-way chaining) is real and was surfaced, not quietly ignored — apply-progress explicitly records "OVER the 400 nominal budget... accepted size:exception for the final slice," citing the repo's own single-file-route precedent (`index.tsx` 380 / `live.tsx` 273 lines). I independently re-confirmed that precedent is real (see Lint below).
+
+### Build & Tests (run myself)
+
+`bun test` (root): **455 pass / 1 fail / 456 total**, 1229 expect() calls, 43 files, 32.48s. Cross-checked the delta precisely: PR2's proven baseline was 448 pass/1208 expect(); I hand-counted the 7 new `ui-api-keys.spec.ts` tests' assertions from source (5+1+1+6+3+1+4 = 21) → 1208+21 = **1229**, an exact match to my own run's reported total — not just the pass-count. The 1 failure, isolated (`bun test __tests__/observability.spec.ts`): `bun: command not found: fuser` → 30.04s hook timeout, 0 pass/1 fail — byte-identical signature to the pre-existing sandbox flake bit-for-bit proven in Unit 1's report. **Zero regressions.**
+Isolated `bun test __tests__/ui-api-keys.spec.ts`: 7 pass / 0 fail, 21 expect() calls, 39ms — confirms the "7 new tests" claim exactly.
+`cd src/ui && bun run typecheck` (`tsr generate && tsc --noEmit`): **exit 0**, zero output. Confirmed myself.
+
+### Live-Service Verification — INDEPENDENT, not a restatement
+
+1. **`systemctl status`**: active/running, `since Fri 2026-07-10 01:11:00 -04` — a plausible, recent restart matching the claimed window. `Main PID 1028749` (`bun run start`) → child `1028751` (`bun src/index.ts`); the claimed PID **1028751 matches exactly** (the real bun process, not the wrapper).
+2. **`journalctl -u claude-plan-api.service`** cross-reference (01:10-01:13 window): the raw `http.request.start/end`+`auth.rejected` event stream independently corroborates the claimed transcript, in order and with sub-millisecond timestamps: no-key 401 (01:11:22.540) → `GET /api/keys` 200×2 (01:11:34.75x) → `POST /api/keys` 201 create (01:11:34.785) → `GET /api/keys` 200 (01:11:51.398, new key authenticates) → `POST /api/keys/2/revoke` 200 (01:11:51.42x) → `GET /api/keys` 200 (01:11:51.431, list shows revoked) → `auth.rejected` (01:11:51.445, revoked key → 401) → `POST /api/keys/2/revoke` 200 again (01:11:51.456, **idempotent 2nd revoke returns HTTP 200, not an error**) → `POST /api/keys/1/revoke` 200 (01:12:13.783, self-revoke cleanup) → `auth.rejected` (01:12:13.794, **self-lockout proven**: the very next request with key 1 is rejected). This is genuine, separately-generated system-log evidence the apply agent could not fabricate after the fact.
+3. **Direct SQLite read of the LIVE production DB** (`logs/telemetry.db`, read-only, bypassing the HTTP API entirely): `api_keys` table has **exactly 2 rows**: id 1 (`cpk_b0a7cbf3`/"admin-ui-verify", `revoked_at: 2026-07-10T05:12:13.784Z` — matches the journal's revoke-1 timestamp **to the millisecond**) and id 2 (`cpk_12d4e31c`/"created-via-curl", `revoked_at: 2026-07-10T05:11:51.419Z`). **BOTH revoked. Zero active keys remain.** Ground-truth confirmation of the "both verification keys revoked as cleanup" claim, independent of the app layer and the apply report — the strongest possible evidence available.
+4. **My own live, read-only curl checks** (no new keys created — list/create/revoke were already independently proven above via journal+DB cross-reference, so a redundant key wasn't necessary per the read-only preference): `GET /api/keys` no key → **HTTP 401** `{"error":{"message":"Unauthorized","code":401}}`, confirmed live just now. `GET /keys` (frontend SPA route) → **HTTP 200**, HTML titled "claude-plan-api · audit" — confirms STEP 1 myself; it wasn't in the journal because static/SPA serving in `server.ts` architecturally bypasses `withObservability` logging entirely (pre-existing, unrelated to this PR — confirmed by reading `server.ts`).
+
+### Code Reading — `keys.tsx` (full 520 lines)
+
+- **`isStoredKeyPrefix()` reuse — CONFIRMED, not re-derived.** Imported from `@/lib/auth` (line 21), called at line 205 (`KeyRow`'s "this session" badge) and line 396 (`RevokeKeyDialog`: `target != null && isStoredKeyPrefix(target.prefix)`). Directly closes PR2 verify's S3 — the inline snippet tasks.md 5.1 showed was NOT re-derived; the tested helper was reused verbatim.
+- **`CopyButton` reuse — CONFIRMED, not a custom implementation.** Imported from `@/components/layout/copy-button` (line 54), used at line 341 inside the plaintext-shown-once dialog.
+- **Self-lockout warning distinctness — CONFIRMED, genuinely stronger.** A dedicated `Alert variant="destructive"` block (lines 441-450, "This is the key you're currently using" / "will log this dashboard out immediately") renders ONLY when `selfLockout` is true, layered on top of (not replacing) the generic revoke copy (lines 430-438).
+- Usage-column code exists and is well-formed (`usageByKeyId` Map keyed by `api_key_id`, lines 91-97; rendered at 223-233) — but see CRITICAL C1: never runtime-proven.
+
+### Code Reading — `api.ts` New Functions (full diff)
+
+`postJson()` is a clean structural mirror of `getJson()`: identical `...authHeaders()` spread, identical `if (res.status===401) throw new UnauthorizedError()` gate. `listApiKeys`/`getUsageByApiKey` → `getJson()`; `createApiKey`/`revokeApiKey` → `postJson()`. **All 4 confirmed to route through the same shared Bearer-attach/401-recovery mechanism PR2 built — not a parallel, unauthenticated path.** Diff is purely additive (`postJson` inserted after `getJson`; 4 new functions + 3 new interfaces appended at file end) — zero pre-existing exports touched.
+
+### Scope Check — CLEAN
+
+`git diff 861abd4..HEAD --name-only` lists exactly 5 files: `__tests__/ui-api-keys.spec.ts`, `tasks.md`, `app-header.tsx`, `api.ts`, `keys.tsx`. This proves BY OMISSION that `storage.ts`, `src/http/routes/keys.ts`, `server.ts`, `auth.ts`, `replay-button.tsx`, `main.tsx`, `__root.tsx`, and api.ts's pre-existing exports are byte-identical to the parent branch. Zero silent scope creep.
+
+### Lint (not claimed/run by apply-progress; added for completeness)
+
+`keys.tsx`: 7× `react-refresh/only-export-components` errors. **Verified NOT a new problem class**: ran the identical rule against every pre-existing single-file route (`index.tsx` 4×, `live.tsx` 4×, `metrics.tsx` 8×, `sessions.tsx` 3×) — 100% consistent, established repo-wide convention. `api.ts`/`app-header.tsx`: zero lint issues.
+
+### Coverage (informational)
+
+`ui-api-keys.spec.ts --coverage`: `api.ts` 53.33% funcs/66.10% lines (whole-file; dragged down by pre-existing untested functions unrelated to this diff). New-code-specific gap: `postJson`'s generic (non-401, `!res.ok`) error branch is uncovered — mirrors `getJson`'s own pre-existing identical gap; not a new risk class.
+
+### tasks.md
+
+All 21 checkboxes across Phases 1-7 are `[x]` (re-counted via `grep -c`: 21 checked, 0 unchecked; Phase1=3,2=4,3=3,4=5,5=3,6=1,7=2). **Discrepancy**: apply-progress's own "Status" line claims "18/18 tasks + verification" — the actual count is **21/21**. The qualitative conclusion (100% done) is still correct, but the self-reported number is wrong.
+
+### Assertion Quality
+
+✅ All 7 new `ui-api-keys.spec.ts` assertions verify real behavior. Zero tautologies, zero ghost loops, zero type-only-alone assertions, zero mock-heavy ratio concerns. Well-triangulated.
+
+### Spec Compliance Matrix (this unit's in-scope items)
+
+| Requirement | Scenario | Test / Evidence | Result |
+|---|---|---|---|
+| List Keys | List omits secrets | PR1 tests (unchanged) + my live curl: 0 `key_hash` occurrences | ✅ COMPLIANT |
+| Create Key | Create returns plaintext once and authenticates | PR1 route tests + journal-corroborated live create→auth sequence | ✅ COMPLIANT |
+| Revoke Key | Revoke deactivates the key | PR1 storage tests + journal+DB cross-reference | ✅ COMPLIANT |
+| Revoke Key | Revoke is idempotent | PR1 tests + journal: 2nd revoke returns HTTP 200 `{revoked:false}` | ✅ COMPLIANT |
+| Self-Lockout Warning | Revoking the stored key warns | `keys.tsx` code (lines 396, 441-450): genuine reuse + distinct copy. Live: self-revoke→401 proven via journal+DB | ✅ COMPLIANT |
+| **Per-Key Usage Column** | **Usage column shows correct totals** | Backend tested (prior change); frontend join is out of automated scope by design, AND manual verification — its designated proof path — **was never executed** (task 7.2 doesn't name it; transcript never calls `/api/telemetry/usage`). Live `requests` table currently has 0 rows total (unrelated pre-existing issue — see W3) so no data exists to check right now regardless | ❌ **UNTESTED** |
+| dashboard-auth: Key entry/persistence | Key persists in localStorage | PR2 tests (unchanged) | ✅ COMPLIANT (PR2) |
+| dashboard-auth: Bearer attach | Bearer sent on gated fetches | PR2 tests + this unit's `postJson`/`getJson` symmetry | ✅ COMPLIANT |
+| dashboard-auth: 401 recovery | 401 shows key-entry prompt | PR2 code/tests (unchanged this unit) | ✅ COMPLIANT (PR2, carried) |
+| dashboard-auth: Key cleared or replaced | Key cleared or replaced | "Replaced" works (AuthGate re-submit). **"Cleared" has zero UI entry point** — `clearStoredKey()` has no production caller anywhere in `src/` (repo-wide grep). PR2 flagged this (S2); Unit 3 did not add one | ⚠️ PARTIAL |
+
+**Compliance summary**: 9/10 in-scope scenarios COMPLIANT, 1/10 UNTESTED (CRITICAL), 1/10 PARTIAL (WARNING).
+
+### Issues Found
+
+**CRITICAL**:
+- **C1 — "Per-Key Usage Column" spec scenario has zero runtime proof, in any of the 3 units, despite being explicitly due in this one.** PR1's verify-report deferred it "out of Unit 1 scope, by design... N/A — frontend, Phase 5" (this unit). Design.md's carve-out allows manual verification for DOM/table rendering — but tasks.md's own 7.2 never enumerates checking the usage column, and the (well-corroborated) manual-verification transcript never calls `/api/telemetry/usage` or observes the rendered column. Not hypothetical: the live `requests` table currently holds **0 rows total** (not just 0 attributed) — `insertRequest()` wraps `INSERT OR IGNORE` in a silently-swallowing `catch {}`, and every write is currently failing on this host for a reason outside this diff. A live spot-check right now would show every key's usage as empty. Given this unit's explicit purpose — "close the code-complete-but-not-runtime-proven gap for ALL scenarios" — this is the one place that promise did not hold.
+
+**WARNING**:
+- **W1 — "Key cleared" has no UI path anywhere in the shipped code, 3 units in.** The OR-requirement's "replaced" branch works, but this is the second unit in a row this was flagged (PR2's S2) and not closed.
+- **W2 — Review size ≈2× the 400-line budget even after 3-way chaining** (803 actual). Reasoning is sound and was surfaced, not hidden, but this is the largest overage of the three units and touches the live service — worth explicit human sign-off.
+- **W3 — Discovery, out of this diff's file scope but directly blocking C1**: live `requests` table has 0 rows total. `insertRequest()` (`src/observability/storage.ts`, untouched by this diff) silently swallows all insert failures. Affects every dashboard feature reading `requests` (Sessions, Live, Metrics, Keys usage), not just this PR — recommend a separate follow-up investigation.
+
+**SUGGESTION**:
+- S1 — apply-progress's "18/18 tasks" status line is wrong; actual is 21/21 (both mean 100% done, but the number is off).
+- S2 — `postJson`'s 401/Bearer behavior is tested only transitively via the GET path, not independently on POST — low risk (literal structural duplicate) but worth a dedicated test.
+- S3 — `postJson`'s generic error branch uncovered, symmetric to `getJson`'s own pre-existing gap.
+- S4 — `keys.tsx`'s 7 lint findings match the established repo-wide single-file-route convention exactly — informational only.
+
+### Verdict
+
+**FAIL** — 1 CRITICAL, 3 WARNING, 4 SUGGESTION.
+
+A strong, honestly-executed implementation on almost every axis checked: 455/456 tests pass with the single pre-existing sandbox flake proven bit-for-bit identical to prior units; typecheck clean; the live-service claims corroborated through THREE independent channels generated myself (systemd journal to the millisecond, a direct read-only SQLite query of the production DB bypassing the HTTP layer, and my own fresh curl calls) — as thoroughly proven as a manual-verification claim can get, and it held up completely. `isStoredKeyPrefix`/`CopyButton` genuinely reused, the self-lockout warning genuinely distinct, every new client function genuinely routes through the shared auth/401 mechanism. Scope clean (proven by omission, not argument). Zero hallucinations found in any specific factual claim checked.
+
+But the one thing this unit was explicitly supposed to deliver — closing the runtime-proof gap for ALL remaining scenarios — did not fully happen: the Per-Key Usage Column scenario was never manually checked, and the underlying data pipeline that would make it checkable is currently silently broken on this host. That is a genuine, concrete CRITICAL gap on a change whose entire remaining purpose was runtime proof.
+
+**next_recommended**: FIX FIRST, then re-verify, before merge:
+1. Investigate why `insertRequest()` is silently failing on the live host (outside this diff's files, but blocking).
+2. Once requests persist again, perform the missing verification: issue a `/v1/*` call with a live key, `GET /api/telemetry/usage`, confirm `/keys`'s usage column renders correctly.
+3. Decide on W1 (clear-key UI) — add a control or explicitly accept replace-only.
+4. Tests, typecheck, code reuse, scope, and size:exception reasoning are all solid and need no rework.
