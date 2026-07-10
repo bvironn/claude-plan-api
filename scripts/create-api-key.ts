@@ -3,12 +3,18 @@
  * Issue a new inbound API key for the gateway.
  *
  * Usage:
- *   API_KEY_PEPPER=<secret> bun scripts/create-api-key.ts <label>
+ *   API_KEY_PEPPER=<secret> bun scripts/create-api-key.ts [--admin] <label>
  *
  * Prints the full `cpk_<prefix>.<secret>` key exactly ONCE. Only its
  * `HMAC-SHA256(API_KEY_PEPPER, full)` digest is persisted in `api_keys` — the
  * plaintext secret is never stored and cannot be recovered afterward. Present
  * the key on a gated route via `Authorization: Bearer <key>` or `X-API-Key`.
+ *
+ * `--admin` mints an ADMIN key (`is_admin = 1`): the ONLY way to grant
+ * dashboard access. The proxy surface (`/v1/*`) accepts any valid key, but the
+ * dashboard data layer (`/api/*`) requires an admin key. This CLI is the sole
+ * admin-minting path (host shell access only) — the UI's create endpoint always
+ * mints non-admin keys, so there is no browser self-escalation path.
  *
  * Two gate-review guardrails distinguish this from `scripts/purge-telemetry.ts`
  * (which opens a raw `Database`):
@@ -21,9 +27,13 @@ import { getApiKeyPepper } from "../src/config.ts";
 import { initStorage, insertApiKey } from "../src/observability/storage.ts";
 import { generateKey, hashKey } from "../src/domain/api-keys.ts";
 
-const label = process.argv[2]?.trim();
+// `--admin` is a flag anywhere in argv; the first remaining positional is the label.
+const args = process.argv.slice(2);
+const isAdmin = args.includes("--admin");
+const label = args.find((a) => a !== "--admin")?.trim();
 if (!label) {
-  console.error("Usage: API_KEY_PEPPER=<secret> bun scripts/create-api-key.ts <label>");
+  console.error("Usage: API_KEY_PEPPER=<secret> bun scripts/create-api-key.ts [--admin] <label>");
+  console.error("  --admin  mint an admin key with dashboard (/api/*) access");
   process.exit(1);
 }
 
@@ -49,9 +59,10 @@ const id = insertApiKey({
   label,
   created_at: new Date().toISOString(),
   revoked_at: null,
+  is_admin: isAdmin ? 1 : 0,
 });
 
-console.log(`Created API key #${id} (label: ${label})`);
+console.log(`Created ${isAdmin ? "ADMIN " : ""}API key #${id} (label: ${label})`);
 console.log("");
 console.log(`  ${full}`);
 console.log("");
