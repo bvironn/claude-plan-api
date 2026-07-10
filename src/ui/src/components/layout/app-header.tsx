@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router"
-import { ActivityIcon, BarChart3Icon, ListIcon, MessagesSquareIcon } from "lucide-react"
+import { ActivityIcon, BarChart3Icon, KeyRoundIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
 
 import { ThemeToggle } from "@/components/layout/theme-toggle"
 import { Separator } from "@/components/ui/separator"
@@ -16,6 +16,7 @@ const NAV: NavItem[] = [
   { to: "/sessions", label: "Sessions", icon: MessagesSquareIcon },
   { to: "/live", label: "Live", icon: ActivityIcon },
   { to: "/metrics", label: "Metrics", icon: BarChart3Icon },
+  { to: "/keys", label: "Keys", icon: KeyRoundIcon },
 ]
 
 export function AppHeader() {
