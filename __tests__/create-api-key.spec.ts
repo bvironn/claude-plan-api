@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "../src/domain/api-keys.ts";
+import { parseCreateKeyArgs } from "../scripts/create-api-key.ts";
 
 // Absolute path to the CLI so it resolves regardless of the spawned cwd.
 const SCRIPT = fileURLToPath(new URL("../scripts/create-api-key.ts", import.meta.url));
@@ -96,5 +97,134 @@ describe("CLI — scripts/create-api-key.ts", () => {
       if (savedPepper === undefined) delete Bun.env.API_KEY_PEPPER;
       else Bun.env.API_KEY_PEPPER = savedPepper;
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // --admin flag: end-to-end is_admin persistence + R1-001 fail-fast (R3-001)
+  // -------------------------------------------------------------------------
+
+  it("--admin mints an ADMIN key (is_admin = 1) end-to-end", async () => {
+    const cwd = makeTmp();
+    const { code, stdout } = await runCli(["--admin", "root-admin"], { API_KEY_PEPPER: "cli-test-pepper" }, cwd);
+
+    expect(code).toBe(0);
+    // Output distinguishes an admin key from a normal one.
+    expect(stdout).toContain("ADMIN");
+
+    const db = new Database(join(cwd, "logs", "telemetry.db"));
+    const row = db.query<{ label: string; is_admin: number }, []>(
+      "SELECT label, is_admin FROM api_keys"
+    ).get();
+    db.close();
+
+    expect(row).not.toBeNull();
+    expect(row!.label).toBe("root-admin");
+    // The ONLY admin-minting path in the system actually sets the flag.
+    expect(row!.is_admin).toBe(1);
+  });
+
+  it("without --admin mints a NON-admin key (is_admin = 0)", async () => {
+    const cwd = makeTmp();
+    const { code } = await runCli(["teammate"], { API_KEY_PEPPER: "cli-test-pepper" }, cwd);
+
+    expect(code).toBe(0);
+    const db = new Database(join(cwd, "logs", "telemetry.db"));
+    const row = db.query<{ label: string; is_admin: number }, []>(
+      "SELECT label, is_admin FROM api_keys"
+    ).get();
+    db.close();
+
+    expect(row!.label).toBe("teammate");
+    expect(row!.is_admin).toBe(0);
+  });
+
+  it("R1-001: a mistyped flag (--Admin) exits non-zero, prints an error, and mints NOTHING", async () => {
+    const cwd = makeTmp();
+    const { code, stdout, stderr } = await runCli(["--Admin", "my-label"], { API_KEY_PEPPER: "cli-test-pepper" }, cwd);
+
+    // Must NOT silently absorb the typo as a label and mint a garbage key.
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("Unknown option");
+    expect(stdout).not.toMatch(FULL_KEY_RE);
+    // The parser rejects before initStorage(), so no DB/api_keys row is created.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pure argv parser (R3-001 + R1-001). No subprocess, no DB — the script body is
+// guarded by `import.meta.main`, so importing `parseCreateKeyArgs` is side-free.
+// This is the fast, exhaustive coverage of the flag-vs-label parsing contract;
+// the subprocess tests above prove it wires through to real is_admin/exit codes.
+// ---------------------------------------------------------------------------
+
+describe("parseCreateKeyArgs — happy paths", () => {
+  it("parses a bare label as a non-admin key", () => {
+    expect(parseCreateKeyArgs(["ci-runner"])).toEqual({
+      ok: true,
+      label: "ci-runner",
+      isAdmin: false,
+    });
+  });
+
+  it("parses --admin before the label as an admin key", () => {
+    expect(parseCreateKeyArgs(["--admin", "root"])).toEqual({
+      ok: true,
+      label: "root",
+      isAdmin: true,
+    });
+  });
+
+  it("accepts --admin AFTER the label too (flag position is free)", () => {
+    expect(parseCreateKeyArgs(["root", "--admin"])).toEqual({
+      ok: true,
+      label: "root",
+      isAdmin: true,
+    });
+  });
+
+  it("trims surrounding whitespace from the label", () => {
+    expect(parseCreateKeyArgs(["  spaced-label  "])).toEqual({
+      ok: true,
+      label: "spaced-label",
+      isAdmin: false,
+    });
+  });
+});
+
+describe("parseCreateKeyArgs — R1-001 fail-fast on malformed input", () => {
+  // Each of these mistyped flags previously became the LABEL (garbage key,
+  // is_admin silently false, exit 0). They must now be hard errors instead.
+  it.each([["--Admin"], ["--admin=1"], ["-admin"], ["--administrator"]])(
+    "rejects the mistyped flag %s instead of absorbing it into the label",
+    (flag) => {
+      const result = parseCreateKeyArgs([flag, "my-label"]);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain(flag);
+    },
+  );
+
+  it("rejects a mistyped flag even when it appears alone (would-be label)", () => {
+    const result = parseCreateKeyArgs(["--Admin"]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("errors on a missing label (empty argv)", () => {
+    const result = parseCreateKeyArgs([]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("errors on --admin with no label", () => {
+    const result = parseCreateKeyArgs(["--admin"]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("errors on a blank/whitespace-only label", () => {
+    const result = parseCreateKeyArgs(["--admin", "   "]);
+    expect(result.ok).toBe(false);
+  });
+
+  it("errors on more than one positional label argument", () => {
+    const result = parseCreateKeyArgs(["label-one", "label-two"]);
+    expect(result.ok).toBe(false);
   });
 });

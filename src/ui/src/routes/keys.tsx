@@ -209,6 +209,9 @@ function KeyRow({
       <TableCell className="font-mono text-xs">
         <div className="flex items-center gap-1.5">
           {apiKey.prefix}
+          {apiKey.is_admin === 1 && (
+            <Badge className="font-normal">Admin</Badge>
+          )}
           {isCurrent && (
             <Badge variant="outline" className="font-normal">
               this session

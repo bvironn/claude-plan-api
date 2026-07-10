@@ -49,6 +49,9 @@ export interface RequestRecord {
 /**
  * A row in the `api_keys` table. Only the digest (`key_hash`) is persisted —
  * never the plaintext secret. `revoked_at` NULL means the key is active.
+ * `is_admin` (0 | 1) marks a dashboard-privileged key: `/api/*` (the dashboard
+ * data layer) requires `is_admin === 1`, while `/v1/*` accepts any valid key.
+ * Only the CLI (`scripts/create-api-key.ts`) can mint an admin key.
  */
 export interface ApiKeyRecord {
   id?: number;
@@ -57,13 +60,15 @@ export interface ApiKeyRecord {
   label: string;
   created_at: string;
   revoked_at?: string | null;
+  is_admin: number;
 }
 
 /**
  * Metadata-only projection of an `api_keys` row, safe to expose over HTTP.
  * Deliberately OMITS `key_hash` (and any plaintext) so a handler that returns
  * an `ApiKeyMeta` cannot leak a secret. `listApiKeys()` SELECTs exactly these
- * columns; `revoked_at` NULL means the key is active.
+ * columns; `revoked_at` NULL means the key is active. `is_admin` is NOT secret
+ * — the admin UI uses it to flag which key(s) hold dashboard access.
  */
 export interface ApiKeyMeta {
   id: number;
@@ -71,6 +76,7 @@ export interface ApiKeyMeta {
   label: string;
   created_at: string;
   revoked_at: string | null;
+  is_admin: number;
 }
 
 /**

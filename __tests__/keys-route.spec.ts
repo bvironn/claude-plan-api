@@ -36,8 +36,8 @@ function push<T extends { mockRestore: () => void }>(spy: T): T {
 }
 
 const SAMPLE_META: ApiKeyMeta[] = [
-  { id: 2, prefix: "cpk_newer", label: "newer", created_at: "2026-03-01T00:00:00Z", revoked_at: null },
-  { id: 1, prefix: "cpk_older", label: "older", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z" },
+  { id: 2, prefix: "cpk_newer", label: "newer", created_at: "2026-03-01T00:00:00Z", revoked_at: null, is_admin: 1 },
+  { id: 1, prefix: "cpk_older", label: "older", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z", is_admin: 0 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -136,6 +136,54 @@ describe("route — POST /api/keys (create)", () => {
 
     expect(res.status).toBe(500);
     expect(ins).not.toHaveBeenCalled();
+  });
+
+  it("ALWAYS mints with is_admin: 0, ignoring any client-supplied is_admin in the body (no self-escalation via the UI)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    let captured: ApiKeyRecord | null = null;
+    push(
+      spyOn(storage, "insertApiKey").mockImplementation((rec) => {
+        captured = rec as ApiKeyRecord;
+        return 99;
+      })
+    );
+
+    const res = await handleKeysCreate(
+      new Request("http://localhost/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Malicious/accidental attempt to mint an admin key from the browser.
+        body: JSON.stringify({ label: "sneaky-admin", is_admin: 1 }),
+      })
+    );
+
+    expect(res.status).toBe(201);
+    expect(captured).not.toBeNull();
+    // The client-supplied is_admin: 1 MUST be ignored — UI keys are never admin.
+    expect(captured!.is_admin).toBe(0);
+  });
+
+  it("mints with is_admin: 0 for a normal create body with no is_admin field (default is non-admin)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    let captured: ApiKeyRecord | null = null;
+    push(
+      spyOn(storage, "insertApiKey").mockImplementation((rec) => {
+        captured = rec as ApiKeyRecord;
+        return 100;
+      })
+    );
+
+    const res = await handleKeysCreate(
+      new Request("http://localhost/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "regular" }),
+      })
+    );
+
+    expect(res.status).toBe(201);
+    expect(captured).not.toBeNull();
+    expect(captured!.is_admin).toBe(0);
   });
 
   it("rejects a missing/blank label with 400 before minting", async () => {

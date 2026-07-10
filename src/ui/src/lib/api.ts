@@ -153,6 +153,11 @@ export interface ApiKeyMeta {
   created_at: string
   /** `null` means the key is active; an ISO timestamp means revoked. */
   revoked_at: string | null
+  /**
+   * `1` marks an admin key (dashboard `/api/*` access). Display-only here — the
+   * UI can never create or toggle admin status; only the CLI mints admin keys.
+   */
+  is_admin: number
 }
 
 export interface ApiKeyListResponse {

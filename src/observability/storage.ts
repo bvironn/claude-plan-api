@@ -86,7 +86,8 @@ export function initStorage(dbPath: string = "logs/telemetry.db"): void {
       key_hash TEXT NOT NULL UNIQUE,
       label TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      revoked_at TEXT
+      revoked_at TEXT,
+      is_admin INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);
   `);
@@ -96,6 +97,9 @@ export function initStorage(dbPath: string = "logs/telemetry.db"): void {
   // Safe to call on every startup — no-op on fresh DBs (column already in CREATE).
   ensureColumn("requests", "upstream_request_body", "TEXT");
   ensureColumn("requests", "api_key_id", "INTEGER");
+  // NOT NULL DEFAULT 0 backfills existing rows to non-admin — pre-admin keys stay
+  // dashboard-locked until a new admin key is minted by the CLI.
+  ensureColumn("api_keys", "is_admin", "INTEGER NOT NULL DEFAULT 0");
   // Index must be created AFTER ensureColumn so pre-existing DBs have the column.
   db.exec("CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id)");
 }
@@ -376,10 +380,12 @@ export function getRequestByTrace(traceId: string): RequestRecord | null {
  */
 export function insertApiKey(rec: ApiKeyRecord): number {
   if (!db) return 0;
-  const res = db.prepare<void, [string, string, string, string, string | null]>(`
-    INSERT INTO api_keys (prefix, key_hash, label, created_at, revoked_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(rec.prefix, rec.key_hash, rec.label, rec.created_at, rec.revoked_at ?? null);
+  // `is_admin` is bound explicitly (no `?? 0` fallback): callers MUST declare a
+  // key's privilege — a security-relevant field is never silently defaulted here.
+  const res = db.prepare<void, [string, string, string, string, string | null, number]>(`
+    INSERT INTO api_keys (prefix, key_hash, label, created_at, revoked_at, is_admin)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(rec.prefix, rec.key_hash, rec.label, rec.created_at, rec.revoked_at ?? null, rec.is_admin);
   return Number(res.lastInsertRowid);
 }
 
@@ -397,13 +403,14 @@ export function getApiKeyByHash(hash: string): ApiKeyRecord | null {
 /**
  * List all keys as metadata only, newest first. SELECTs an explicit column
  * allowlist — NEVER `SELECT *` — so `key_hash` (or any future secret column)
- * is structurally impossible to leak through this path. Returns both active
- * and revoked keys (the admin UI shows `revoked_at`); `[]` before init.
+ * is structurally impossible to leak through this path. `is_admin` is on the
+ * allowlist (not a secret; the admin UI flags master keys with it). Returns
+ * both active and revoked keys (the admin UI shows `revoked_at`); `[]` before init.
  */
 export function listApiKeys(): ApiKeyMeta[] {
   if (!db) return [];
   return db.query<ApiKeyMeta, []>(
-    `SELECT id, prefix, label, created_at, revoked_at
+    `SELECT id, prefix, label, created_at, revoked_at, is_admin
      FROM api_keys ORDER BY created_at DESC`
   ).all();
 }

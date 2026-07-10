@@ -72,6 +72,12 @@ async function _handleKeysCreate(req: Request): Promise<Response> {
     label: trimmed,
     created_at,
     revoked_at: null,
+    // ALWAYS non-admin — the request body is NEVER trusted for this. Only the
+    // CLI (`scripts/create-api-key.ts`, host shell access) may mint an admin
+    // key. This closes any browser-session self-escalation path (defense in
+    // depth: even a caller who already holds an admin key cannot mint another
+    // admin key from the UI).
+    is_admin: 0,
   });
 
   // EXPLICIT literal DTO — assembled field by field. Do NOT spread the record:
