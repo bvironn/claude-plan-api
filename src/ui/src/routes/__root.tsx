@@ -4,7 +4,16 @@ import {
   Outlet,
   useRouter,
 } from "@tanstack/react-router"
-import { useCallback, useEffect, useMemo, useRef } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { AlertCircleIcon, ArrowLeftIcon } from "lucide-react"
 
 import { AppHeader } from "@/components/layout/app-header"
@@ -15,6 +24,17 @@ import {
 } from "@/hooks/useKeyboardShortcuts"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { authStore, setStoredKey } from "@/lib/auth"
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -112,11 +132,85 @@ function RootComponent() {
     <KeyboardShortcutContext.Provider value={contextValue}>
       <div className="bg-background text-foreground flex min-h-screen flex-col">
         <AppHeader />
+        <AuthGate />
         <main className="flex-1">
           <Outlet />
         </main>
       </div>
     </KeyboardShortcutContext.Provider>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Auth gate — key-entry modal driven by the global auth store
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders a key-entry Dialog whenever the auth store is active. The store is
+ * flipped on by a 401 (via `QueryCache.onError` in `main.tsx`) or by the
+ * raw-fetch Replay path calling `authStore.requireKey()`. On submit the key
+ * is persisted and ALL queries are invalidated so they refetch with the
+ * Bearer attached — satisfying the "401 → prompt → retry" recovery flow.
+ */
+function AuthGate() {
+  const active = useSyncExternalStore(
+    authStore.subscribe,
+    authStore.getSnapshot,
+  )
+  const queryClient = useQueryClient()
+  const [value, setValue] = useState("")
+
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const trimmed = value.trim()
+    if (!trimmed) return
+    setStoredKey(trimmed)
+    setValue("")
+    authStore.dismiss()
+    // Refetch every query now that a Bearer is available.
+    void queryClient.invalidateQueries()
+  }
+
+  return (
+    <Dialog
+      open={active}
+      onOpenChange={(open) => {
+        if (!open) authStore.dismiss()
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertCircleIcon className="text-amber-500" />
+            API key required
+          </DialogTitle>
+          <DialogDescription>
+            This dashboard requires an API key. Paste a valid key to continue —
+            it is stored in your browser and sent as a Bearer token on gated
+            requests.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="auth-gate-key">API key</Label>
+            <Input
+              id="auth-gate-key"
+              type="password"
+              autoFocus
+              autoComplete="off"
+              placeholder="cpk_live_…"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="submit" disabled={!value.trim()}>
+              Save key
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
 

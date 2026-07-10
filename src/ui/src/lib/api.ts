@@ -11,6 +11,7 @@ import type {
   TelemetryEvent,
   Metrics,
 } from "./types"
+import { authHeaders, UnauthorizedError } from "./auth"
 
 // ---------------------------------------------------------------------------
 // Fetch helper
@@ -18,8 +19,14 @@ import type {
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", ...authHeaders() },
   })
+  // A 401 means the stored key is missing/invalid/revoked. Surface a typed
+  // error so the global QueryCache.onError can trigger the key-entry modal
+  // instead of showing a generic failure.
+  if (res.status === 401) {
+    throw new UnauthorizedError()
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "")
     throw new Error(`GET ${url} failed: ${res.status} ${text.slice(0, 200)}`)
@@ -103,17 +110,4 @@ export function listLogs(filters: LogsFilters = {}): Promise<LogsResponse> {
 
 export function getMetrics(windowMs: number): Promise<Metrics> {
   return getJson<Metrics>(`/api/telemetry/metrics?window=${windowMs}`)
-}
-
-// ---------------------------------------------------------------------------
-// Replay (POST /v1/chat/completions with the original body)
-// ---------------------------------------------------------------------------
-
-export async function replay(requestBody: string, signal?: AbortSignal): Promise<Response> {
-  return fetch("/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: requestBody,
-    signal,
-  })
 }

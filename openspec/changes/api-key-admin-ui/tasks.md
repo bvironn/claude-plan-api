@@ -45,11 +45,11 @@ Chain strategy: stacked-to-main
 
 ## Phase 4: Frontend Auth Infrastructure
 
-- [ ] 4.1 Create `src/ui/src/lib/auth.ts` — `getStoredKey`/`setStoredKey`/`clearStoredKey` (`localStorage` key `cpk_dashboard_key`); `authHeaders()` returns `{Authorization: "Bearer "+key}` or `{}`; `parseKeyPrefix(full)` = `full.split(".")[0]`; minimal external store (`subscribe`/`getSnapshot`/`requireKey`/`dismiss`) consumed via `useSyncExternalStore`
-- [ ] 4.2 Modify `src/ui/src/lib/api.ts` — `getJson()` merges `...authHeaders()` in fetch headers; on `res.status===401` throw `new UnauthorizedError()`; **delete dead `replay()`** export (zero callers)
-- [ ] 4.3 Modify `src/ui/src/components/transcript/replay-button.tsx` — merge `...authHeaders()` into raw `fetch("/v1/chat/completions")` headers; on `res.status===401` call `authStore.requireKey()`
-- [ ] 4.4 Modify `src/ui/src/main.tsx` — add `QueryClient({ defaultOptions: { queries: { retry: (count, err) => !(err instanceof UnauthorizedError) && count < 1 } }, queryCache: new QueryCache({ onError: ... }) })` wiring
-- [ ] 4.5 Modify `src/ui/src/routes/__root.tsx` — mount `<AuthGate>` component before `<Outlet />`, wired to auth store state
+- [x] 4.1 Create `src/ui/src/lib/auth.ts` — `getStoredKey`/`setStoredKey`/`clearStoredKey` (`localStorage` key `cpk_dashboard_key`); `authHeaders()` returns `{Authorization: "Bearer "+key}` or `{}`; `parseKeyPrefix(full)` = `full.split(".")[0]`; minimal external store (`subscribe`/`getSnapshot`/`requireKey`/`dismiss`) consumed via `useSyncExternalStore`
+- [x] 4.2 Modify `src/ui/src/lib/api.ts` — `getJson()` merges `...authHeaders()` in fetch headers; on `res.status===401` throw `new UnauthorizedError()`; **delete dead `replay()`** export (zero callers)
+- [x] 4.3 Modify `src/ui/src/components/transcript/replay-button.tsx` — merge `...authHeaders()` into raw `fetch("/v1/chat/completions")` headers; on `res.status===401` call `authStore.requireKey()`
+- [x] 4.4 Modify `src/ui/src/main.tsx` — add `QueryClient({ defaultOptions: { queries: { retry: (count, err) => !(err instanceof UnauthorizedError) && count < 1 } }, queryCache: new QueryCache({ onError: ... }) })` wiring
+- [x] 4.5 Modify `src/ui/src/routes/__root.tsx` — mount `<AuthGate>` component before `<Outlet />`, wired to auth store state
 
 ## Phase 5: Frontend Keys UI Route
 
@@ -59,7 +59,7 @@ Chain strategy: stacked-to-main
 
 ## Phase 6: Frontend Pure-Logic Unit Tests
 
-- [ ] 6.1 Create `__tests__/ui-auth.spec.ts` — `parseKeyPrefix` splits correctly; `authHeaders()` returns `{}` when no `localStorage` key and `{Authorization: "Bearer ..."}` when present; self-lockout null guard: `null` stored key → no warning, never calls `parseKeyPrefix(null)`
+- [x] 6.1 Create `__tests__/ui-auth.spec.ts` — `parseKeyPrefix` splits correctly; `authHeaders()` returns `{}` when no `localStorage` key and `{Authorization: "Bearer ..."}` when present; self-lockout null guard: `null` stored key → no warning, never calls `parseKeyPrefix(null)`
 
 ## Phase 7: Documentation & Manual Verification
 

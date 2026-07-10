@@ -21,6 +21,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import type { RequestRecord } from "@/lib/types"
+import { authHeaders, authStore } from "@/lib/auth"
 import { TranscriptView } from "@/components/transcript/transcript-view"
 
 // ---------------------------------------------------------------------------
@@ -147,6 +148,9 @@ export function ReplayButton({
         headers: {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
+          // Gated endpoint: attach the stored key on EVERY request. This raw
+          // fetch bypasses `getJson`, so it carries the Bearer itself.
+          ...authHeaders(),
         },
         body: original.requestBody,
         signal: controller.signal,
@@ -155,6 +159,9 @@ export function ReplayButton({
       emit({ status: res.status }, { streaming: true, finished: false, error: null })
 
       if (!res.ok || !res.body) {
+        // A raw fetch never reaches QueryCache.onError, so a 401 here must
+        // open the key-entry modal directly (the existing toast path stays).
+        if (res.status === 401) authStore.requireKey()
         const text = await res.text().catch(() => "")
         const msg = `HTTP ${res.status}: ${text.slice(0, 200)}`
         emit(
