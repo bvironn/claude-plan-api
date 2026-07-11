@@ -1,8 +1,8 @@
 import { test, expect, describe } from "bun:test"
 
-import { deriveKeyMetrics, findApiKeyById } from "../keys-metrics"
-import type { ApiKeyMeta } from "../api"
-import type { RequestRecord } from "../types"
+import { deriveKeyMetrics, findApiKeyById } from "../src/ui/src/lib/keys-metrics"
+import type { ApiKeyMeta } from "../src/ui/src/lib/api"
+import type { RequestRecord } from "../src/ui/src/lib/types"
 
 // Minimal RequestRecord factory — only the columns deriveKeyMetrics reads
 // matter; the rest are filled with schema-plausible defaults so the input is a
