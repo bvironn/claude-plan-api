@@ -9,8 +9,9 @@ import {
 } from "lucide-react"
 import { useMemo, useState } from "react"
 
-import { getRequest, listRequests } from "@/lib/api"
+import { getRequest } from "@/lib/api"
 import { groupIntoConversations } from "@/lib/sessions"
+import { sessionGroupingQueryOptions } from "@/lib/session-query"
 import { computeExpandedTurns, toggleTurnInteraction } from "@/lib/session-turns"
 import { formatDuration, formatRelativeTime, formatTokens, truncate } from "@/lib/format"
 import { cn } from "@/lib/utils"
@@ -46,18 +47,11 @@ export const Route = createFileRoute("/s/$sessionId")({
 function SessionDetailPage() {
   const { sessionId } = Route.useParams()
 
-  // To resolve `sessionId` → conversation, we re-group the full list. Cheap
-  // relative to the transcript fetches that follow.
-  const groupQuery = useQuery({
-    queryKey: ["requests", "all-chat-completions"],
-    queryFn: () =>
-      listRequests({
-        path: "/v1/chat/completions",
-        limit: 500,
-        order: "desc",
-      }),
-    refetchInterval: 10_000,
-  })
+  // To resolve `sessionId` → conversation, we re-group the recent list. Cheap
+  // relative to the transcript fetches that follow. Uses the shared poll-free
+  // resolver: no 10s full-body poll (audit finding #3), resolve once + cached,
+  // per-turn transcripts fetched on demand via `getRequest` below.
+  const groupQuery = useQuery(sessionGroupingQueryOptions())
 
   const conversation = useMemo(() => {
     if (!groupQuery.data) return null
