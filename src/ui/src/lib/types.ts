@@ -26,9 +26,15 @@ export interface RequestRecord {
   totalTokens?: number
   cacheReadTokens?: number
   cacheCreationTokens?: number
-  requestBody: string | null
-  responseBody: string | null
-  upstreamRequestBody: string | null
+  // Body fields are OPTIONAL: the list endpoint is slim by default and omits
+  // them (dashboard-performance-2). They are present on the `?bodies=full` list
+  // shape and always on the by-id transcript endpoint.
+  requestBody?: string | null
+  responseBody?: string | null
+  upstreamRequestBody?: string | null
+  // Server-derived first user-message preview (post-preamble, <=400 chars, null
+  // for non-chat). Present on both shapes; the grouping input for the slim list.
+  firstUserPreview?: string | null
   error: string | null
   ip?: string
   userAgent?: string
@@ -181,4 +187,6 @@ export interface RequestFilters {
   limit?: number
   offset?: number
   order?: "asc" | "desc"
+  /** Opt into the full request/response/upstream bodies on the list endpoint. */
+  bodies?: "full"
 }

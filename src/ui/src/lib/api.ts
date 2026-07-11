@@ -111,6 +111,12 @@ export interface RequestListResponse {
   requests: RequestRecord[]
 }
 
+/**
+ * List telemetry requests. Slim by default (no request/response/upstream
+ * bodies); pass `bodies: "full"` in `filters` to opt into the full shape. The
+ * flag rides through `toQuery` generically — no dedicated signature change —
+ * so the backend receives `?bodies=full`.
+ */
 export function listRequests(filters: RequestFilters = {}): Promise<RequestListResponse> {
   return getJson<RequestListResponse>(`/api/telemetry/requests${toQuery(filters as Record<string, unknown>)}`)
 }
