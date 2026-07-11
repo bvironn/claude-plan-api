@@ -525,17 +525,35 @@ export interface UsageFilters {
 }
 
 /**
+ * Default lookback window `getUsageByApiKey()` applies when the caller supplies
+ * no `timeFrom`. This is a storage-layer chokepoint: the /api/telemetry/usage
+ * route is polled roughly every 15s by the keys dashboard with no window, so
+ * without this bound every poll would aggregate the ENTIRE `requests` history.
+ * 30 days matches a typical usage/billing period while keeping the scan bounded.
+ *
+ * The default only fills in for an ABSENT lower bound — a caller can widen or
+ * narrow the window with an explicit `timeFrom` (e.g. `"1970-01-01T00:00:00Z"`
+ * for full history).
+ */
+export const DEFAULT_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
  * Aggregate per-key usage from the `requests` table: request count and summed
  * token columns grouped by `api_key_id`, joined to `api_keys` for prefix/label.
  * Only attributed rows (`api_key_id IS NOT NULL`) are included. An optional
- * `timeFrom`/`timeTo` window bounds the rows. Mirrors the `getMetrics()`
- * `SUM(...)` idiom; returns `[]` (not an error) when nothing matches.
+ * `timeFrom`/`timeTo` window bounds the rows; when `timeFrom` is omitted the
+ * storage layer enforces `DEFAULT_USAGE_WINDOW_MS` so aggregation never scans
+ * the full history. Mirrors the `getMetrics()` `SUM(...)` idiom; returns `[]`
+ * (not an error) when nothing matches.
  */
 export function getUsageByApiKey(filters: UsageFilters = {}): UsageByKey[] {
   if (!db) return [];
-  const conds: string[] = ["r.api_key_id IS NOT NULL"];
-  const vals: SQLQueryBindings[] = [];
-  if (filters.timeFrom) { conds.push("r.timestamp >= ?"); vals.push(filters.timeFrom); }
+  // Chokepoint: an absent lower bound defaults to a bounded lookback window
+  // rather than the full `requests` history.
+  const timeFrom =
+    filters.timeFrom ?? new Date(Date.now() - DEFAULT_USAGE_WINDOW_MS).toISOString();
+  const conds: string[] = ["r.api_key_id IS NOT NULL", "r.timestamp >= ?"];
+  const vals: SQLQueryBindings[] = [timeFrom];
   if (filters.timeTo) { conds.push("r.timestamp <= ?"); vals.push(filters.timeTo); }
   const where = `WHERE ${conds.join(" AND ")}`;
   return db.query<UsageByKey, SQLQueryBindings[]>(`
