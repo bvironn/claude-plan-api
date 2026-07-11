@@ -3,18 +3,26 @@ import { useQuery } from "@tanstack/react-query"
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
+  ChevronDownIcon,
   ClockIcon,
   MessagesSquareIcon,
 } from "lucide-react"
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 
 import { getRequest, listRequests } from "@/lib/api"
 import { groupIntoConversations } from "@/lib/sessions"
+import { computeExpandedTurns, toggleTurnInteraction } from "@/lib/session-turns"
 import { formatDuration, formatRelativeTime, formatTokens, truncate } from "@/lib/format"
+import { cn } from "@/lib/utils"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -72,6 +80,26 @@ function SessionDetailPage() {
     },
   })
 
+  // Collapse state. `userInteracted` holds the traceIds of PRIOR turns the user
+  // has explicitly toggled open; membership survives poll re-renders so a
+  // manual expand is never reset by an unrelated refetch. The last turn is
+  // always expanded (derived, never stored).
+  const [userInteracted, setUserInteracted] = useState<Set<string>>(new Set())
+
+  const turnIds = useMemo(
+    () => turnsQuery.data?.map((t) => t.request.traceId) ?? [],
+    [turnsQuery.data],
+  )
+
+  const expandedTurns = useMemo(
+    () => computeExpandedTurns(turnIds, userInteracted),
+    [turnIds, userInteracted],
+  )
+
+  const handleToggle = (traceId: string) => {
+    setUserInteracted((prev) => toggleTurnInteraction(traceId, prev))
+  }
+
   return (
     <div className="container mx-auto flex flex-col gap-4 p-4 sm:p-6">
       <div className="flex items-center gap-3">
@@ -122,14 +150,20 @@ function SessionDetailPage() {
             </div>
           ) : (
             <div className="flex flex-col gap-6">
-              {turnsQuery.data?.map((turn, i) => (
-                <TurnSection
-                  key={turn.request.traceId}
-                  index={i}
-                  total={turnsQuery.data?.length ?? 0}
-                  request={turn.request}
-                />
-              ))}
+              {turnsQuery.data?.map((turn, i) => {
+                const total = turnsQuery.data?.length ?? 0
+                return (
+                  <TurnSection
+                    key={turn.request.traceId}
+                    index={i}
+                    total={total}
+                    request={turn.request}
+                    isLast={i === total - 1}
+                    isExpanded={expandedTurns.has(turn.request.traceId)}
+                    onToggle={() => handleToggle(turn.request.traceId)}
+                  />
+                )
+              })}
             </div>
           )}
         </>
@@ -182,36 +216,90 @@ function TurnSection({
   index,
   total,
   request,
+  isLast,
+  isExpanded,
+  onToggle,
 }: {
   index: number
   total: number
   request: import("@/lib/types").RequestRecord
+  isLast: boolean
+  isExpanded: boolean
+  onToggle: () => void
 }) {
-  return (
-    <section className="flex flex-col gap-3">
-      <div className="bg-muted/40 sticky top-14 z-20 -mx-4 flex items-center gap-2 border-b px-4 py-2 backdrop-blur-md sm:-mx-6 sm:px-6">
-        <Badge variant="secondary" className="font-mono">
-          Turn {index + 1} / {total}
-        </Badge>
-        <StatusBadge status={request.status} />
-        <span className="text-muted-foreground text-xs">
-          {formatRelativeTime(request.timestamp)} · {formatDuration(request.duration)} ·{" "}
-          {formatTokens(request.outputTokens)} tokens out
-        </span>
-        <div className="ml-auto flex items-center gap-1">
-          <Link
-            to="/r/$traceId"
-            params={{ traceId: request.traceId }}
-            className="text-muted-foreground hover:text-foreground font-mono text-xs"
-            title="Open this turn's standalone transcript"
-          >
-            {request.traceId.slice(0, 8)}
-          </Link>
-          <CopyButton value={request.traceId} label="Copy trace id" />
+  // Turn identity summary — badge, status, and meta. For prior (collapsible)
+  // turns this becomes the Collapsible trigger button and gains a chevron.
+  const summary = (
+    <>
+      <Badge variant="secondary" className="font-mono">
+        Turn {index + 1} / {total}
+      </Badge>
+      <StatusBadge status={request.status} />
+      <span className="text-muted-foreground text-xs">
+        {formatRelativeTime(request.timestamp)} · {formatDuration(request.duration)} ·{" "}
+        {formatTokens(request.outputTokens)} tokens out
+      </span>
+      {!isLast && (
+        <ChevronDownIcon
+          className={cn(
+            "text-muted-foreground size-4 shrink-0 transition-transform",
+            isExpanded && "rotate-180",
+          )}
+        />
+      )}
+    </>
+  )
+
+  // Right-side controls (deep link + copy). These are interactive elements
+  // (`<a>` and `<button>`) so they MUST live as siblings of the trigger, never
+  // nested inside it — nesting interactive elements is invalid HTML.
+  const controls = (
+    <div className="ml-auto flex items-center gap-1">
+      <Link
+        to="/r/$traceId"
+        params={{ traceId: request.traceId }}
+        className="text-muted-foreground hover:text-foreground font-mono text-xs"
+        title="Open this turn's standalone transcript"
+      >
+        {request.traceId.slice(0, 8)}
+      </Link>
+      <CopyButton value={request.traceId} label="Copy trace id" />
+    </div>
+  )
+
+  const barClass =
+    "bg-muted/40 sticky top-14 z-20 -mx-4 flex items-center gap-2 border-b px-4 py-2 backdrop-blur-md sm:-mx-6 sm:px-6"
+
+  // Last turn: always expanded, no collapsible trigger (spec: single-turn and
+  // last-turn requirements).
+  if (isLast) {
+    return (
+      <section className="flex flex-col gap-3">
+        <div className={barClass}>
+          {summary}
+          {controls}
         </div>
-      </div>
-      <TranscriptView record={request} />
-    </section>
+        <TranscriptView record={request} />
+      </section>
+    )
+  }
+
+  // Prior turns: collapsible. The summary cluster is the trigger; the
+  // transcript is the collapsible content. Controls sit outside the trigger.
+  return (
+    <Collapsible open={isExpanded} onOpenChange={onToggle} asChild>
+      <section className="flex flex-col gap-3">
+        <div className={barClass}>
+          <CollapsibleTrigger className="-my-2 flex flex-1 cursor-pointer items-center gap-2 py-2 text-left">
+            {summary}
+          </CollapsibleTrigger>
+          {controls}
+        </div>
+        <CollapsibleContent>
+          <TranscriptView record={request} />
+        </CollapsibleContent>
+      </section>
+    </Collapsible>
   )
 }
 
