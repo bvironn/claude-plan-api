@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router"
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router"
 import { useQuery } from "@tanstack/react-query"
 import {
   AlertCircleIcon,
@@ -6,7 +6,7 @@ import {
   MessageSquareIcon,
   MessagesSquareIcon,
 } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useMemo } from "react"
 
 import { listApiKeys, listRequests } from "@/lib/api"
 import { groupIntoConversations } from "@/lib/sessions"
@@ -27,17 +27,32 @@ import {
 import { ModelBadge } from "@/components/layout/status-badge"
 import { RouteError } from "@/components/layout/route-error"
 
+// Typed search params from URL — mirrors the Requests route so `/keys/$keyId`
+// can deep-link here with `?apiKeyId=<id>` and pre-filter the session list.
+type SessionsSearch = {
+  apiKeyId?: number
+}
+
 export const Route = createFileRoute("/sessions")({
   component: SessionsPage,
   errorComponent: RouteError,
+  validateSearch: (search): SessionsSearch => {
+    const raw = Number(search.apiKeyId)
+    const apiKeyId = Number.isInteger(raw) && raw >= 0 ? raw : undefined
+    return { apiKeyId }
+  },
 })
 
 function SessionsPage() {
-  // Sessions has no URL-param infra (unlike Requests), so the key filter is
-  // held in local React state per the change's design choice. `apiKeyId` is
-  // part of the query key so selecting a key triggers a re-fetch, and the
-  // filtered request set feeds `groupIntoConversations` before grouping.
-  const [apiKeyId, setApiKeyId] = useState<number | undefined>(undefined)
+  // The key filter lives in the URL (`?apiKeyId=`) so it is shareable and
+  // deep-linkable from `/keys/$keyId`. `apiKeyId` is part of the query key so
+  // changing it triggers a re-fetch, and the filtered request set feeds
+  // `groupIntoConversations` before grouping.
+  const { apiKeyId } = Route.useSearch()
+  const navigate = useNavigate({ from: Route.fullPath })
+  const setApiKeyId = (next: number | undefined) => {
+    void navigate({ search: () => ({ apiKeyId: next }), replace: true })
+  }
 
   const query = useQuery({
     queryKey: ["requests", "all-chat-completions", apiKeyId ?? "all"],
