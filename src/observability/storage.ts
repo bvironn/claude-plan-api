@@ -87,7 +87,8 @@ export function initStorage(dbPath: string = "logs/telemetry.db"): void {
       label TEXT NOT NULL,
       created_at TEXT NOT NULL,
       revoked_at TEXT,
-      is_admin INTEGER NOT NULL DEFAULT 0
+      is_admin INTEGER NOT NULL DEFAULT 0,
+      rotated_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);
   `);
@@ -100,6 +101,8 @@ export function initStorage(dbPath: string = "logs/telemetry.db"): void {
   // NOT NULL DEFAULT 0 backfills existing rows to non-admin — pre-admin keys stay
   // dashboard-locked until a new admin key is minted by the CLI.
   ensureColumn("api_keys", "is_admin", "INTEGER NOT NULL DEFAULT 0");
+  // Additive nullable TEXT: NULL means "never rotated" (rotate-api-key change).
+  ensureColumn("api_keys", "rotated_at", "TEXT");
   // Index must be created AFTER ensureColumn so pre-existing DBs have the column.
   db.exec("CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id)");
 }
@@ -412,7 +415,7 @@ export function getApiKeyByHash(hash: string): ApiKeyRecord | null {
 export function listApiKeys(): ApiKeyMeta[] {
   if (!db) return [];
   return db.query<ApiKeyMeta, []>(
-    `SELECT id, prefix, label, created_at, revoked_at, is_admin
+    `SELECT id, prefix, label, created_at, revoked_at, is_admin, rotated_at
      FROM api_keys ORDER BY created_at DESC`
   ).all();
 }
@@ -448,6 +451,34 @@ export function updateApiKeyLabel(id: number, label: string): boolean {
     `UPDATE api_keys SET label = ?
      WHERE id = ? AND revoked_at IS NULL`
   ).run(label, id);
+  return res.changes > 0;
+}
+
+/**
+ * In-place secret swap on an ACTIVE key: atomically replaces `prefix` +
+ * `key_hash` and stamps `rotated_at`, but never touches `id`, `label`,
+ * `created_at`, or `is_admin` — the SAME row keeps its `requests.api_key_id`
+ * attribution history and privilege level (mirrors `updateApiKeyLabel`'s
+ * active-only scoping and column discipline). `is_admin` is deliberately NOT
+ * in the SET clause: it is structurally impossible for a rotation to change a
+ * key's privilege.
+ *
+ * Unlike the telemetry inserts, this does NOT swallow errors: a `key_hash`
+ * UNIQUE collision (astronomically unlikely with 256-bit entropy, but a
+ * defense-in-depth guard) must surface to the caller rather than being
+ * silently absorbed — the atomic UPDATE leaves the original row untouched on
+ * failure (mirrors `insertApiKey`'s no-swallow discipline).
+ *
+ * Returns `true` iff a row changed; `false` for a revoked or nonexistent id
+ * (the route maps `false` to 409/404 via a preliminary lookup, identical to
+ * `updateApiKeyLabel`).
+ */
+export function rotateApiKey(id: number, prefix: string, keyHash: string, rotatedAt: string): boolean {
+  if (!db) return false;
+  const res = db.prepare<void, [string, string, string, number]>(
+    `UPDATE api_keys SET prefix = ?, key_hash = ?, rotated_at = ?
+     WHERE id = ? AND revoked_at IS NULL`
+  ).run(prefix, keyHash, rotatedAt, id);
   return res.changes > 0;
 }
 

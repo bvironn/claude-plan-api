@@ -61,6 +61,8 @@ export interface ApiKeyRecord {
   created_at: string;
   revoked_at?: string | null;
   is_admin: number;
+  /** UTC ISO timestamp of the most recent rotation; `null`/undefined means never rotated. */
+  rotated_at?: string | null;
 }
 
 /**
@@ -77,6 +79,8 @@ export interface ApiKeyMeta {
   created_at: string;
   revoked_at: string | null;
   is_admin: number;
+  /** UTC ISO timestamp of the most recent rotation; `null`/undefined means never rotated. */
+  rotated_at?: string | null;
 }
 
 /**

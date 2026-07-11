@@ -1,6 +1,6 @@
 import { getApiKeyPepper } from "../../config.ts";
 import { generateKey, hashKey } from "../../domain/api-keys.ts";
-import { listApiKeys, insertApiKey, revokeApiKey, updateApiKeyLabel } from "../../observability/storage.ts";
+import { listApiKeys, insertApiKey, revokeApiKey, updateApiKeyLabel, rotateApiKey } from "../../observability/storage.ts";
 import { withObservability } from "../../observability/middleware.ts";
 
 /**
@@ -165,7 +165,74 @@ async function _handleKeysRename(req: Request): Promise<Response> {
   });
 }
 
+/**
+ * POST /api/keys/:id/rotate → `200 RotatedApiKey` (active-only, plaintext once).
+ *
+ * In-place secret swap on the SAME `id` — mints a fresh `{prefix, full}` via
+ * the identical `generateKey()` sequence as create, hashes it in the ROUTE
+ * (storage never sees plaintext, mirrors `_handleKeysCreate`), and persists
+ * via a single atomic `rotateApiKey()` UPDATE. The success response is an
+ * EXPLICIT literal `RotatedApiKey` DTO assembled field by field; it MUST NEVER
+ * spread the DB row (which carries `key_hash`) or `existing` (a stale
+ * `ApiKeyMeta`, not the new state).
+ *
+ * State distinction (spec: revoked 409, unknown 404) mirrors `_handleKeysRename`:
+ * a preliminary `listApiKeys()` lookup classifies the target BEFORE mutating,
+ * because `rotateApiKey`'s bare affected-rows check alone cannot tell
+ * "revoked" from "nonexistent" (both yield `false`).
+ *
+ * A `key_hash` UNIQUE collision from `rotateApiKey()` is deliberately NOT
+ * caught here — it propagates to the server's outer try/catch (→ 5xx), and
+ * the atomic UPDATE leaves the original row untouched (REQ-4).
+ */
+async function _handleKeysRotate(req: Request): Promise<Response> {
+  const { pathname } = new URL(req.url);
+  const match = /^\/api\/keys\/([^/]+)\/rotate$/.exec(pathname);
+  const id = match ? Number(match[1]) : Number.NaN;
+  // A non-integer id can never match a row → 404 (mirrors rename's NaN guard).
+  if (!Number.isInteger(id)) {
+    return json({ error: { message: "Not found" } }, 404);
+  }
+
+  // Classify the target BEFORE mutating so 404 (unknown) and 409 (revoked) are
+  // distinguishable — rotateApiKey returns `false` for both.
+  const existing = listApiKeys().find((k) => k.id === id);
+  if (!existing) {
+    return json({ error: { message: "Not found" } }, 404);
+  }
+  if (existing.revoked_at != null) {
+    return json({ error: { message: "Cannot rotate a revoked key" } }, 409);
+  }
+
+  const { prefix, full } = generateKey();
+  const rotated_at = new Date().toISOString();
+  // Deliberately NOT wrapped in try/catch: a UNIQUE collision on key_hash must
+  // surface (REQ-4), not be swallowed. The atomic UPDATE's WHERE clause means
+  // a thrown error leaves the original row untouched.
+  const rotated = rotateApiKey(id, prefix, hashKey(full), rotated_at);
+  // The active-only UPDATE matches no row when the key was revoked in the window
+  // since the preliminary classification (TOCTOU). Never report success with a
+  // plaintext that was never persisted — re-classify the race loss as revoked.
+  if (!rotated) {
+    return json({ error: { message: "Cannot rotate a revoked key" } }, 409);
+  }
+
+  // EXPLICIT literal DTO — assembled field by field. Do NOT spread any row:
+  // `full` is the plaintext, shown this one time only; everything else comes
+  // from the preliminary lookup plus the freshly minted prefix/timestamp.
+  return json({
+    id: existing.id,
+    prefix,
+    label: existing.label,
+    created_at: existing.created_at,
+    revoked_at: existing.revoked_at,
+    rotated_at,
+    full,
+  });
+}
+
 export const handleKeysList = withObservability(_handleKeysList);
 export const handleKeysCreate = withObservability(_handleKeysCreate);
 export const handleKeysRevoke = withObservability(_handleKeysRevoke);
 export const handleKeysRename = withObservability(_handleKeysRename);
+export const handleKeysRotate = withObservability(_handleKeysRotate);

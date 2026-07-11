@@ -4,6 +4,7 @@ import {
   handleKeysCreate,
   handleKeysRevoke,
   handleKeysRename,
+  handleKeysRotate,
 } from "../src/http/routes/keys.ts";
 import * as storage from "../src/observability/storage.ts";
 import type { ApiKeyMeta, ApiKeyRecord } from "../src/observability/types.ts";
@@ -419,5 +420,126 @@ describe("route — PATCH /api/keys/:id (rename)", () => {
     expect(res.status).toBe(404);
     expect(upd).not.toHaveBeenCalled();
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/keys/:id/rotate — in-place secret swap, active-only, one-time reveal
+// ---------------------------------------------------------------------------
+
+function rotateReq(id: string): Request {
+  return new Request(`http://localhost/api/keys/${id}/rotate`, { method: "POST" });
+}
+
+describe("route — POST /api/keys/:id/rotate", () => {
+  it("rotates an active key → 200 with an explicit RotatedApiKey DTO carrying a fresh `full` (sc1, sc8)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const rot = push(spyOn(storage, "rotateApiKey").mockReturnValue(true));
+
+    const res = await handleKeysRotate(rotateReq("3"));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    // Explicit literal DTO — exactly these seven keys, nothing else.
+    expect(Object.keys(body).sort()).toEqual(
+      ["created_at", "full", "id", "label", "prefix", "revoked_at", "rotated_at"]
+    );
+    expect(body.id).toBe(3);
+    expect(body.label).toBe(ACTIVE_KEY.label);
+    expect(body.created_at).toBe(ACTIVE_KEY.created_at);
+    expect(body.revoked_at).toBeNull();
+    expect(typeof body.rotated_at).toBe("string");
+    // The new prefix in the DTO matches whatever the route minted and forwarded to storage.
+    expect(rot).toHaveBeenCalledWith(3, body.prefix, expect.any(String), body.rotated_at);
+    // `full` is the one-time plaintext: `${new prefix}.${secret}`.
+    expect(typeof body.full).toBe("string");
+    expect((body.full as string).startsWith((body.prefix as string) + ".")).toBe(true);
+  });
+
+  it("the new prefix differs from the key's prior prefix (sc10, via the route's generateKey call)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    push(spyOn(storage, "rotateApiKey").mockReturnValue(true));
+
+    const res = await handleKeysRotate(rotateReq("3"));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(body.prefix).not.toBe(ACTIVE_KEY.prefix);
+  });
+
+  it("NEGATIVE: the response JSON contains NO key_hash and NO stale plaintext (sc11)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    push(spyOn(storage, "rotateApiKey").mockReturnValue(true));
+
+    const res = await handleKeysRotate(rotateReq("3"));
+
+    const raw = await res.text();
+    expect(raw.includes("key_hash")).toBe(false);
+  });
+
+  it("returns 409 for a revoked key and never calls rotateApiKey (sc5)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    push(spyOn(storage, "listApiKeys").mockReturnValue([REVOKED_KEY]));
+    const rot = push(spyOn(storage, "rotateApiKey").mockReturnValue(true));
+
+    const res = await handleKeysRotate(rotateReq("4"));
+
+    expect(res.status).toBe(409);
+    expect(rot).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a nonexistent id and never calls rotateApiKey (sc6)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const rot = push(spyOn(storage, "rotateApiKey").mockReturnValue(true));
+
+    const res = await handleKeysRotate(rotateReq("999"));
+
+    expect(res.status).toBe(404);
+    expect(rot).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a non-numeric id without touching storage", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    const list = push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const rot = push(spyOn(storage, "rotateApiKey").mockReturnValue(true));
+
+    const res = await handleKeysRotate(rotateReq("not-a-number"));
+
+    expect(res.status).toBe(404);
+    expect(rot).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 without leaking a plaintext when the key is revoked in the race between classification and UPDATE (TOCTOU)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    // Preliminary classification sees the key as active...
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    // ...but the atomic active-only UPDATE matched no row (concurrently revoked) → false.
+    push(spyOn(storage, "rotateApiKey").mockReturnValue(false));
+
+    const res = await handleKeysRotate(rotateReq("3"));
+
+    // Must NOT report success with a credential that was never persisted.
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("full");
+  });
+
+  it("propagates a key_hash UNIQUE collision instead of swallowing it — original row is left to storage's atomic rollback (sc7)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    push(
+      spyOn(storage, "rotateApiKey").mockImplementation(() => {
+        throw new Error("UNIQUE constraint failed: api_keys.key_hash");
+      })
+    );
+
+    // The route must NOT catch this — it propagates so the outer dispatcher
+    // (server.ts's try/catch) turns it into a 5xx. Calling the wrapped handler
+    // directly means the rejection surfaces as a thrown/rejected promise.
+    await expect(handleKeysRotate(rotateReq("3"))).rejects.toThrow(/UNIQUE/);
   });
 });
