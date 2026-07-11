@@ -538,6 +538,18 @@ export interface UsageFilters {
 export const DEFAULT_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 /**
+ * Resolve the effective `timeFrom` a {@link getUsageByApiKey} call will apply:
+ * the caller-supplied value verbatim, or the `DEFAULT_USAGE_WINDOW_MS`
+ * lookback boundary when omitted. Exported so callers outside this module
+ * (the `/api/telemetry/usage` route's DTO) can report the ACTUAL window that
+ * was applied instead of masking a silently-imposed default behind `null`
+ * (REL-001) — without duplicating the default-window arithmetic.
+ */
+export function resolveUsageTimeFrom(timeFrom?: string): string {
+  return timeFrom ?? new Date(Date.now() - DEFAULT_USAGE_WINDOW_MS).toISOString();
+}
+
+/**
  * Aggregate per-key usage from the `requests` table: request count and summed
  * token columns grouped by `api_key_id`, joined to `api_keys` for prefix/label.
  * Only attributed rows (`api_key_id IS NOT NULL`) are included. An optional
@@ -550,8 +562,7 @@ export function getUsageByApiKey(filters: UsageFilters = {}): UsageByKey[] {
   if (!db) return [];
   // Chokepoint: an absent lower bound defaults to a bounded lookback window
   // rather than the full `requests` history.
-  const timeFrom =
-    filters.timeFrom ?? new Date(Date.now() - DEFAULT_USAGE_WINDOW_MS).toISOString();
+  const timeFrom = resolveUsageTimeFrom(filters.timeFrom);
   const conds: string[] = ["r.api_key_id IS NOT NULL", "r.timestamp >= ?"];
   const vals: SQLQueryBindings[] = [timeFrom];
   if (filters.timeTo) { conds.push("r.timestamp <= ?"); vals.push(filters.timeTo); }
