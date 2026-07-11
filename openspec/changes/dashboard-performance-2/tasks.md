@@ -29,13 +29,13 @@ Chain strategy: stacked-to-main
 
 - [x] 1.1 Create `src/http/compression.ts` — `maybeCompress(req, res)` gate: `Accept-Encoding` negotiation (br → gzip → identity), allowlist (JSON, known static types) + buffered-body check + no existing `Content-Encoding` guard; sets `Content-Encoding` / `Vary: Accept-Encoding`
 - [x] 1.2 Modify `src/http/server.ts` — extract route dispatch tail, wrap single return with `maybeCompress` call; `enforceApiKey`/OPTIONS remain first; static.ts passes through the central gate (no per-file change)
-- [ ] 1.3 Create `src/observability/conversation-preview.ts` — backend pure function `firstUserPreview(body: string): string|null` extracting first user message text (post-preamble split, ≤400 chars, null for non-chat), mirroring UI heuristic from `sessions.ts`
-- [ ] 1.4 Modify `src/http/routes/telemetry/requests.ts` — `toCamel()` two-shape projection: slim omits `requestBody`/`responseBody`/`upstreamRequestBody`, adds `firstUserPreview`; parse `?bodies=full` opt-in; by-id endpoint stays full always
+- [x] 1.3 Create `src/observability/conversation-preview.ts` — backend pure function `firstUserPreview(body: string): string|null` extracting first user message text (post-preamble split, ≤400 chars, null for non-chat), mirroring UI heuristic from `sessions.ts`
+- [x] 1.4 Modify `src/http/routes/telemetry/requests.ts` — `toCamel()` two-shape projection: slim omits `requestBody`/`responseBody`/`upstreamRequestBody`, adds `firstUserPreview`; parse `?bodies=full` opt-in; by-id endpoint stays full always
 - [ ] 1.5 Modify `src/ui/src/lib/types.ts` — `RequestRecord.requestBody`/`responseBody`/`upstreamRequestBody` optional (`string | null | undefined`); add `firstUserPreview?: string | null`; add `RequestFilters.bodies?: "full"`
 - [ ] 1.6 Modify `src/ui/src/lib/api.ts` — `listRequests` forwards `bodies` via `toQuery` param passthrough (no signature change)
 - [ ] 1.7 Modify `src/ui/src/lib/sessions.ts` — `firstUserTextFromRequest` prefers `record.firstUserPreview`, falls back to existing `requestBody`/`upstreamRequestBody` body parse
 - [x] 1.8 Write RED test: compression eligibility — br/gzip pick, identity, exclusion rules (SSE, streaming, already-compressed) — verify `Content-Encoding`/`Vary`, decode round-trips byte-identical
-- [ ] 1.9 Write RED test: slim projection omits 3 body fields, keeps metadata + `firstUserPreview`
+- [x] 1.9 Write RED test: slim projection omits 3 body fields, keeps metadata + `firstUserPreview`
 - [ ] 1.10 Write RED test: **grouping parity** — `groupIntoConversations(slim)` produces same conversation ids as `groupIntoConversations(full)` (fixtures with known grouping)
 - [x] 1.11 Write RED test: auth-gate-before-compression — `maybeCompress` runs after `enforceApiKey`, cannot bypass auth
 - [x] 1.12 Write RED test: SSE / streaming export uncompressed — `text/event-stream` and `ReadableStream` responses pass through with no `Content-Encoding`
