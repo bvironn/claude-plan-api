@@ -571,6 +571,23 @@ export interface Metrics {
   errorsByRoute: Record<string, number>;
 }
 
+/**
+ * Upper bound on the latency sample `getMetrics()` sorts for percentile
+ * computation. Instead of scanning every `duration_ms` row in the window
+ * (unbounded memory + sort cost under load), we take the most-recent
+ * SAMPLE_CAP rows (`ORDER BY timestamp DESC LIMIT SAMPLE_CAP`) and compute
+ * p50/p95/p99 over that sample in JS.
+ *
+ * Tolerance / approximation: when the window holds MORE than SAMPLE_CAP
+ * requests, the reported percentiles describe the most-recent SAMPLE_CAP
+ * requests (a recency-biased sample), not the entire window — a burst of old
+ * outliers no longer skews the tail. When the window holds SAMPLE_CAP or fewer
+ * requests, the result is EXACT (identical to the prior unbounded scan). A
+ * deterministic recency cap (NOT reservoir sampling) is used on purpose so the
+ * values are reproducible and tests never depend on an RNG seed.
+ */
+export const SAMPLE_CAP = 10_000;
+
 export function getMetrics(windowMs: number = 60_000): Metrics {
   if (!db) return {
     eventsPerMin: 0, activeErrors: 0, latencyP50: 0, latencyP95: 0, latencyP99: 0,
@@ -580,9 +597,9 @@ export function getMetrics(windowMs: number = 60_000): Metrics {
   const since = new Date(Date.now() - windowMs).toISOString();
   const evRow = db.query<{ n: number }, [string]>("SELECT COUNT(*) as n FROM events WHERE timestamp >= ?").get(since);
   const errRow = db.query<{ n: number }, [string]>("SELECT COUNT(*) as n FROM events WHERE level IN ('error','fatal') AND timestamp >= ?").get(since);
-  const latRows = db.query<{ duration_ms: number }, [string]>(
-    "SELECT duration_ms FROM requests WHERE timestamp >= ? AND duration_ms IS NOT NULL ORDER BY duration_ms"
-  ).all(since);
+  const latRows = db.query<{ duration_ms: number }, [string, number]>(
+    "SELECT duration_ms FROM requests WHERE timestamp >= ? AND duration_ms IS NOT NULL ORDER BY timestamp DESC LIMIT ?"
+  ).all(since, SAMPLE_CAP);
   const totRow = db.query<{ n: number }, [string]>("SELECT COUNT(*) as n FROM requests WHERE timestamp >= ?").get(since);
   const statusRows = db.query<{ status: number; n: number }, [string]>(
     "SELECT status, COUNT(*) as n FROM requests WHERE timestamp >= ? GROUP BY status"
@@ -594,7 +611,9 @@ export function getMetrics(windowMs: number = 60_000): Metrics {
     "SELECT path, COUNT(*) as n FROM requests WHERE timestamp >= ? AND status >= 500 GROUP BY path"
   ).all(since);
 
-  const durations = latRows.map((r) => r.duration_ms);
+  // The capped sample comes back ordered by recency (timestamp DESC); sort it
+  // ascending by duration so the nearest-rank percentile index is meaningful.
+  const durations = latRows.map((r) => r.duration_ms).sort((a, b) => a - b);
   const p = (pct: number): number =>
     durations.length ? (durations[Math.floor(durations.length * pct / 100)] ?? 0) : 0;
   const byStatus: Record<number, number> = {};
