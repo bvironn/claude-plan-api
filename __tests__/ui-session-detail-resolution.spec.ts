@@ -22,12 +22,28 @@ import * as api from "../src/ui/src/lib/api"
 // ---------------------------------------------------------------------------
 
 describe("sessionGroupingQueryOptions", () => {
-  // Core spec requirement: the detail view must NOT re-poll the full 500-row
-  // list every 10s. A `refetchInterval` is exactly how React Query opts a query
-  // into recurring background refetches, so its ABSENCE proves the poll is gone.
-  test("does not set refetchInterval — no recurring 500-row poll", () => {
+  // REL-001 regression: React Query only refetches a STALE query on a trigger
+  // event (mount, window focus, reconnect, manual invalidate) — never purely
+  // from elapsed time. A session-detail view left open AND focused would
+  // otherwise never see new turns added elsewhere to the same conversation,
+  // indefinitely. A positive `refetchInterval` is the only trigger that fires
+  // without any user action, so its presence is what proves that gap is
+  // closed — this does NOT restore the old 10s full-body poll (finding #3);
+  // this query already resolves the slim default list shape (see the
+  // "queryFn fetches..." test below), it's the grouping-only concern.
+  test("sets a positive refetchInterval so an idle, focused tab still sees new turns", () => {
     const opts = sessionGroupingQueryOptions() as Record<string, unknown>
-    expect(opts.refetchInterval).toBeUndefined()
+    expect(typeof opts.refetchInterval).toBe("number")
+    expect(opts.refetchInterval as number).toBeGreaterThan(0)
+  })
+
+  // The interval should align with the staleTime it's paired with, not
+  // reintroduce the old wasteful sub-staleness churn.
+  test("refetchInterval is at or above the query's own staleTime", () => {
+    const opts = sessionGroupingQueryOptions() as Record<string, unknown>
+    expect(opts.refetchInterval as number).toBeGreaterThanOrEqual(
+      opts.staleTime as number,
+    )
   })
 
   // "Resolve once via staleTime": a positive staleTime keeps the grouped list
