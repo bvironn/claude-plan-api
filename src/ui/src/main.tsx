@@ -20,7 +20,10 @@ import { routeTree } from "./routeTree.gen"
 const router = createRouter({
   routeTree,
   defaultPreload: "intent",
-  defaultPreloadStaleTime: 0,
+  // Non-zero so an `intent` preload (hover/focus) within this window reuses
+  // the query cache instead of firing a redundant fetch right before the
+  // real navigation. Matches the QueryClient staleTime below.
+  defaultPreloadStaleTime: 20_000,
   scrollRestoration: true,
 })
 
@@ -47,13 +50,21 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       // Audit UI consumes live-ish data; keep it fresh but don't hammer.
-      staleTime: 5_000,
+      // Bounded to 20s: long enough that switching tabs or re-focusing the
+      // window doesn't force a redundant refetch of data that's still
+      // effectively current, short enough that stale reads don't linger.
+      staleTime: 20_000,
       gcTime: 5 * 60_000,
       // Keep a single retry for transient errors, but NEVER retry an auth
       // failure — the key-entry prompt should appear immediately, not after a
       // backoff. (failureCount starts at 0, so `count < 1` == the old retry:1.)
       retry: (count, error) =>
         !(error instanceof UnauthorizedError) && count < 1,
+      // Kept true: refocus-refetch only fires when data is actually stale
+      // (past the 20s staleTime above), so it no longer causes the
+      // redundant-on-every-focus churn a short/zero staleTime produced.
+      // Routes that need tighter freshness (e.g. the live request list) opt
+      // in explicitly via their own `refetchInterval`.
       refetchOnWindowFocus: true,
     },
   },

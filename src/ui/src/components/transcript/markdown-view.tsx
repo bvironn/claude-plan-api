@@ -1,9 +1,15 @@
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useEffect, useState } from "react"
-import type { Highlighter, BundledLanguage } from "shiki"
 
 import { cn } from "@/lib/utils"
+
+// Shiki types are reached ONLY through the dynamic `import("shiki")` below —
+// no static/type-only top-level import — so Vite emits shiki as a separate
+// async chunk instead of folding it into this route's synchronous bundle.
+type ShikiModule = typeof import("shiki")
+type Highlighter = Awaited<ReturnType<ShikiModule["createHighlighter"]>>
+type BundledLanguage = import("shiki").BundledLanguage
 
 // Langs we lazy-load into shiki. Keep the list tight — each adds ~5-20 KB
 // to the highlighter bundle. Add on-demand if the response asks for one
