@@ -45,12 +45,18 @@ describe("computeExpandedTurns", () => {
     expect(expanded.has("b")).toBe(false)
   })
 
-  // Task 2.5 — spec: Re-collapse a manually expanded turn
-  test("clearing a prior turn from userInteracted re-collapses it", () => {
-    // After the user re-collapses "a", it is no longer in userInteracted.
-    const expanded = computeExpandedTurns(["a", "b", "c"], new Set())
-    expect(expanded.has("a")).toBe(false)
-    expect(expanded).toEqual(new Set(["c"]))
+  // Task 2.5 — spec: Re-collapse a manually expanded turn.
+  // Exercises the real round-trip (expand -> toggle off -> collapsed), not just
+  // an already-empty set, so the "re-collapse" behavior is genuinely proven.
+  test("re-collapsing a manually expanded prior turn removes it from the expanded set", () => {
+    // Prior turn "a" is user-expanded; last turn "c" is always expanded.
+    const expandedBefore = computeExpandedTurns(["a", "b", "c"], new Set(["a"]))
+    expect(expandedBefore).toEqual(new Set(["a", "c"]))
+    // The user re-collapses "a" via the toggle; deriving again drops it.
+    const interactedAfter = toggleTurnInteraction("a", new Set(["a"]))
+    const expandedAfter = computeExpandedTurns(["a", "b", "c"], interactedAfter)
+    expect(expandedAfter.has("a")).toBe(false)
+    expect(expandedAfter).toEqual(new Set(["c"]))
   })
 
   // Task 2.6 — spec: New turn arrives via polling / prior preserved
