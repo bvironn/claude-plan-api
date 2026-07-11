@@ -15,11 +15,16 @@ let db: Database;
 /**
  * Open (or create) the telemetry SQLite database and ensure the schema.
  *
- * `dbPath` defaults to the on-disk `logs/telemetry.db`. Pass `":memory:"` for
- * deterministic, isolated tests (no disk I/O). Any other path is treated as a
- * file and its parent directory is created.
+ * `dbPath` defaults to `TELEMETRY_DB_PATH` (env) or the on-disk
+ * `logs/telemetry.db`. Point `TELEMETRY_DB_PATH` at a location OUTSIDE the deploy
+ * tree (e.g. `/var/lib/claude-plan-api/telemetry.db`) so a redeploy that cleans
+ * the working directory does not wipe the store — `logs/` is gitignored. Pass
+ * `":memory:"` for deterministic, isolated tests (no disk I/O). Any other path
+ * is treated as a file and its parent directory is created.
  */
-export function initStorage(dbPath: string = "logs/telemetry.db"): void {
+export function initStorage(
+  dbPath: string = Bun.env.TELEMETRY_DB_PATH || "logs/telemetry.db",
+): void {
   if (dbPath !== ":memory:") {
     mkdirSync(dirname(dbPath), { recursive: true });
   }
@@ -119,6 +124,39 @@ function ensureColumn(table: string, column: string, type: string): void {
   const rows = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
   if (rows.some((r) => r.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
+/**
+ * Fold the write-ahead log into the durable database file WITHOUT closing the
+ * connection. Call periodically while running: in WAL mode committed rows sit in
+ * the `-wal` sidecar until a checkpoint moves them into the main `.db`, and
+ * SQLite's automatic checkpoint only fires once the WAL passes ~1000 pages. A
+ * passive checkpoint keeps the durable file current so an abrupt kill (OOM,
+ * SIGKILL) loses at most the most recent writes instead of everything.
+ */
+export function checkpointStorage(): void {
+  if (!db) return;
+  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+}
+
+/**
+ * Checkpoint the WAL into the durable file and close the connection. MUST run on
+ * graceful shutdown. Without it the process exits with all data still in the
+ * transient `-wal`/`-shm` sidecars; losing those (a redeploy cleaning the
+ * gitignored `logs/`, or a backup that copies only `telemetry.db`) resets the
+ * store to an empty schema. `TRUNCATE` also resets the WAL file so it does not
+ * grow unbounded across the process lifetime.
+ */
+export function closeStorage(): void {
+  if (!db) return;
+  try {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  } finally {
+    db.close();
+    // Idempotent: a second closeStorage() (e.g. from the shutdown force path)
+    // must be a no-op rather than exec on a closed handle.
+    db = undefined as unknown as Database;
+  }
 }
 
 // Prepared statements — initialised lazily after initStorage() is called

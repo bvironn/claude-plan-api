@@ -3,7 +3,7 @@ import { refreshRegistry } from "./domain/models.ts";
 import { startServer } from "./http/server.ts";
 import { emit } from "./observability/logger.ts";
 import { installGlobalHandlers } from "./observability/globals.ts";
-import { initStorage } from "./observability/storage.ts";
+import { initStorage, checkpointStorage, closeStorage } from "./observability/storage.ts";
 
 installGlobalHandlers();
 initStorage();
@@ -24,6 +24,19 @@ const tokenRefreshInterval = setInterval(
   60_000
 );
 
+// Periodically fold the WAL into the durable telemetry.db. In WAL mode committed
+// rows sit in the transient `-wal` sidecar until a checkpoint, and SQLite's
+// automatic one only fires past ~1000 pages. Without this a hard kill (OOM,
+// SIGKILL — no graceful shutdown) followed by loss of the sidecar (e.g. a
+// redeploy cleaning the gitignored logs/) would reset the store to empty.
+const checkpointInterval = setInterval(() => {
+  try {
+    checkpointStorage();
+  } catch (err) {
+    emit("error", "storage.checkpoint.failed", { error: String(err) });
+  }
+}, 5 * 60_000);
+
 // Graceful shutdown: stop accepting new connections, give in-flight requests
 // up to 5 seconds to complete, then force-close. Prevents systemd from waiting
 // the default 90s TimeoutStopSec when restarting the service.
@@ -33,18 +46,26 @@ const shutdown = async (signal: string) => {
   shuttingDown = true;
   emit("info", "process.shutdown.start", { signal });
   clearInterval(tokenRefreshInterval);
+  clearInterval(checkpointInterval);
   const forceTimer = setTimeout(() => {
     emit("warn", "process.shutdown.forceClose", { signal });
     server.stop(true);
+    // Flush the WAL into the durable file even on the forced path so committed
+    // telemetry/keys are not stranded in the transient sidecars.
+    closeStorage();
     process.exit(0);
   }, 5_000);
   try {
     await server.stop();
     clearTimeout(forceTimer);
+    // Server drained: checkpoint the WAL and close so all committed data lands
+    // in telemetry.db before exit (otherwise it lives only in the -wal sidecar).
+    closeStorage();
     emit("info", "process.shutdown.complete", { signal });
     process.exit(0);
   } catch (err) {
     clearTimeout(forceTimer);
+    closeStorage();
     emit("error", "process.shutdown.error", { signal, error: String(err) });
     process.exit(1);
   }
