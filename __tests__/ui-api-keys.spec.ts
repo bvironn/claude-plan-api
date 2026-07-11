@@ -20,6 +20,7 @@ import {
   createApiKey,
   getUsageByApiKey,
   listApiKeys,
+  renameApiKey,
   revokeApiKey,
 } from "../src/ui/src/lib/api"
 import { setStoredKey, UnauthorizedError } from "../src/ui/src/lib/auth"
@@ -144,6 +145,47 @@ describe("revokeApiKey", () => {
     mockFetch({ revoked: false })
     const res = await revokeApiKey(999)
     expect(res.revoked).toBe(false)
+  })
+})
+
+describe("renameApiKey", () => {
+  test("PATCHes /api/keys/:id with a JSON {label} body and returns the updated metadata", async () => {
+    mockFetch(
+      { id: 7, prefix: "cpk_live_pp", label: "renamed", created_at: "2026-07-10T00:00:00Z", revoked_at: null, is_admin: 0 },
+      200,
+    )
+
+    const updated = await renameApiKey(7, "renamed")
+
+    expect(updated.id).toBe(7)
+    expect(updated.label).toBe("renamed")
+    expect(updated.revoked_at).toBeNull()
+    const [url, init] = firstCall()
+    expect(url).toBe("/api/keys/7")
+    expect(init?.method).toBe("PATCH")
+    const headers = init?.headers as Record<string, string>
+    expect(headers["Content-Type"]).toBe("application/json")
+    expect(JSON.parse(init?.body as string)).toEqual({ label: "renamed" })
+  })
+
+  test("attaches Authorization: Bearer when a key is stored", async () => {
+    setStoredKey("cpk_live_aa.secret-tail")
+    mockFetch({ id: 1, prefix: "cpk_live_aa", label: "x", created_at: "2026-07-10T00:00:00Z", revoked_at: null, is_admin: 0 })
+
+    await renameApiKey(1, "x")
+
+    const headers = firstCall()[1]?.headers as Record<string, string>
+    expect(headers.Authorization).toBe("Bearer cpk_live_aa.secret-tail")
+  })
+
+  test("throws UnauthorizedError on a 401", async () => {
+    mockFetch({ error: "no key" }, 401)
+    await expect(renameApiKey(1, "x")).rejects.toBeInstanceOf(UnauthorizedError)
+  })
+
+  test("throws a descriptive error on a 409 (revoked key)", async () => {
+    mockFetch({ error: { message: "Cannot rename a revoked key" } }, 409)
+    await expect(renameApiKey(4, "new")).rejects.toThrow(/409/)
   })
 })
 

@@ -14,7 +14,7 @@ import {
   handleTelemetryExport,
   handleTelemetryUsage,
 } from "./routes/telemetry/index.ts";
-import { handleKeysList, handleKeysCreate, handleKeysRevoke } from "./routes/keys.ts";
+import { handleKeysList, handleKeysCreate, handleKeysRevoke, handleKeysRename } from "./routes/keys.ts";
 import { serveStatic, serveSpaFallback } from "./static.ts";
 import { withObservability } from "../observability/middleware.ts";
 import { emit } from "../observability/logger.ts";
@@ -53,7 +53,7 @@ export async function handleRequest(req: Request): Promise<Response> {
       status: 204,
       headers: {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
       },
     });
@@ -90,6 +90,7 @@ export async function handleRequest(req: Request): Promise<Response> {
     if (method === "GET" && pathname === "/api/keys") return await handleKeysList(req);
     if (method === "POST" && pathname === "/api/keys") return await handleKeysCreate(req);
     if (method === "POST" && /^\/api\/keys\/[^/]+\/revoke$/.test(pathname)) return await handleKeysRevoke(req);
+    if (method === "PATCH" && /^\/api\/keys\/[^/]+$/.test(pathname)) return await handleKeysRename(req);
 
     // Static asset serving for the built UI. Only kicks in on GET; POST
     // and other verbs fall through to the 404 below.

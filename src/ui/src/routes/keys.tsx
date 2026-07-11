@@ -4,6 +4,7 @@ import {
   AlertCircleIcon,
   AlertTriangleIcon,
   KeyRoundIcon,
+  PencilIcon,
   PlusIcon,
   ShieldOffIcon,
 } from "lucide-react"
@@ -13,6 +14,7 @@ import {
   createApiKey,
   getUsageByApiKey,
   listApiKeys,
+  renameApiKey,
   revokeApiKey,
   type ApiKeyMeta,
   type CreatedApiKey,
@@ -219,7 +221,9 @@ function KeyRow({
           )}
         </div>
       </TableCell>
-      <TableCell className="text-sm">{apiKey.label}</TableCell>
+      <TableCell className="text-sm">
+        <KeyLabelCell apiKey={apiKey} disabled={revoked} />
+      </TableCell>
       <TableCell className="text-muted-foreground text-xs">
         {formatRelativeTime(apiKey.created_at)}
       </TableCell>
@@ -258,6 +262,105 @@ function KeyRow({
         </Button>
       </TableCell>
     </TableRow>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Inline-rename label cell
+// ---------------------------------------------------------------------------
+// Click the label (active keys only) to swap it for an <Input>. Enter / blur
+// confirms via renameApiKey and invalidates the ["keys"] query so the row
+// reflects the persisted value; Escape cancels. Revoked keys are read-only
+// (backend returns 409), so the edit affordance is disabled for them — the
+// label renders as plain, non-interactive text.
+
+function KeyLabelCell({
+  apiKey,
+  disabled,
+}: {
+  apiKey: ApiKeyMeta
+  disabled: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(apiKey.label)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  function startEditing() {
+    if (disabled) return
+    setValue(apiKey.label)
+    setError(null)
+    setEditing(true)
+  }
+
+  function cancel() {
+    setEditing(false)
+    setError(null)
+    setValue(apiKey.label)
+  }
+
+  async function commit() {
+    const trimmed = value.trim()
+    // No-op edits (unchanged or blank) just close the editor — mirror create's
+    // client-side non-empty guard so a blank label never hits the backend.
+    if (trimmed === "" || trimmed === apiKey.label) {
+      cancel()
+      return
+    }
+    setSubmitting(true)
+    setError(null)
+    try {
+      await renameApiKey(apiKey.id, trimmed)
+      await queryClient.invalidateQueries({ queryKey: ["keys"] })
+      setSubmitting(false)
+      setEditing(false)
+    } catch (err) {
+      setError((err as Error).message)
+      setSubmitting(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={startEditing}
+        className="group flex items-center gap-1.5 text-left enabled:cursor-pointer disabled:cursor-default"
+        title={disabled ? undefined : "Rename label"}
+      >
+        <span>{apiKey.label}</span>
+        {!disabled && (
+          <PencilIcon className="text-muted-foreground size-3 opacity-0 transition-opacity group-hover:opacity-100" />
+        )}
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <Input
+        autoFocus
+        autoComplete="off"
+        aria-label="Key label"
+        className="h-7 text-sm"
+        value={value}
+        disabled={submitting}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault()
+            void commit()
+          } else if (e.key === "Escape") {
+            e.preventDefault()
+            cancel()
+          }
+        }}
+      />
+      {error && <span className="text-destructive text-xs">{error}</span>}
+    </div>
   )
 }
 
