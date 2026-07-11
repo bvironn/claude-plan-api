@@ -70,6 +70,24 @@ export function getApiKeyPepper(): string {
   return Bun.env.API_KEY_PEPPER ?? "";
 }
 
+/**
+ * Filesystem path to the telemetry/keys SQLite store, resolved the SAME way for
+ * the server (`initStorage`) AND every CLI script (`create-api-key`,
+ * `purge-telemetry`). Centralised here so they never open DIFFERENT databases —
+ * a CLI run in a plain shell writing to `logs/telemetry.db` while the service
+ * uses `/var/lib/...` is the split-brain that makes a freshly-created key never
+ * authenticate.
+ *
+ * Defaults to the in-tree `logs/telemetry.db` (dev-friendly, portable). In
+ * production set `TELEMETRY_DB_PATH` to a path OUTSIDE the deploy tree (e.g.
+ * `/var/lib/claude-plan-api/telemetry.db`) via the systemd EnvironmentFile so a
+ * redeploy cannot wipe it; the CLI wrapper `scripts/create-api-key.sh` loads the
+ * same env file so keys land in that same store.
+ */
+export function getTelemetryDbPath(): string {
+  return Bun.env.TELEMETRY_DB_PATH?.trim() || "logs/telemetry.db";
+}
+
 // Upper bound (ms) on how long we honour an upstream `retry-after` before
 // surfacing the error to the caller. Anthropic returns hour-scale values
 // when a Max subscription has exhausted its quota; without this cap the

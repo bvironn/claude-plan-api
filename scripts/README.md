@@ -4,9 +4,33 @@ Operational scripts for `claude-plan-api`.
 
 | Script | Purpose |
 |--------|---------|
-| `purge-telemetry.ts` | Hot-purge `logs/telemetry.db` while the API keeps running (WAL-safe). |
-| `create-api-key.ts` | Issue a new API key (stores only the digest). |
+| `create-api-key.sh` | **Use this in production.** Wrapper that loads the prod env (`/etc/claude-plan-api/env`) then runs `create-api-key.ts`, so the key lands in the service's database. |
+| `create-api-key.ts` | Issue a new API key (stores only the digest). Resolves the DB via `TELEMETRY_DB_PATH`. |
+| `purge-telemetry.ts` | Hot-purge the telemetry store while the API keeps running (WAL-safe). Resolves the DB via `TELEMETRY_DB_PATH`. |
 | `bare-thinking-test.ts` | Ad-hoc upstream "thinking" probe. |
+
+## ⚠️ Which database do the scripts write to?
+
+`create-api-key.ts` and `purge-telemetry.ts` open the store returned by
+`getTelemetryDbPath()` — `TELEMETRY_DB_PATH` if set, else `logs/telemetry.db`.
+The systemd service sets `TELEMETRY_DB_PATH=/var/lib/claude-plan-api/telemetry.db`,
+so a CLI run in a **plain shell** (where that var is unset) would write to a
+DIFFERENT database and the new key would never authenticate.
+
+**In production always create keys via the wrapper**, which loads the same env
+the service uses:
+
+```sh
+# admin key = the ONLY way to grant dashboard (/api/*) access
+scripts/create-api-key.sh --admin <label>
+```
+
+To run any other script against the production store, load the env first:
+
+```sh
+set -a; . /etc/claude-plan-api/env; set +a
+bun scripts/purge-telemetry.ts [keepHours]
+```
 
 ## ⚠️ Log/telemetry safety while the service is live
 

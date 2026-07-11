@@ -12,9 +12,13 @@
  * (it serializes against an exclusive lock at the end) but won't crash.
  */
 import { Database } from "bun:sqlite";
+import { getTelemetryDbPath } from "../src/config.ts";
 
 const keepHours = Number(process.argv[2] ?? 1);
-const dbPath = "logs/telemetry.db";
+// Resolve the SAME store the running service uses (TELEMETRY_DB_PATH), so purge
+// never operates on a stale logs/telemetry.db in production. Run it with the
+// production env loaded (e.g. `set -a; . /etc/claude-plan-api/env; set +a`).
+const dbPath = getTelemetryDbPath();
 
 console.log(`[purge] opening ${dbPath} — will keep last ${keepHours}h of data`);
 

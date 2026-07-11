@@ -3,6 +3,7 @@ import type { SQLQueryBindings } from "bun:sqlite";
 import type { TelemetryEvent, RequestRecord, ApiKeyRecord, ApiKeyMeta, UsageByKey } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { getTelemetryDbPath } from "../config.ts";
 // NOTE: two-file cycle — logger.ts imports insertEvent() from here, and we
 // import emit() from there. This is safe because both are hoisted function
 // declarations (initialised during ESM linking) and emit() is only referenced
@@ -15,16 +16,14 @@ let db: Database;
 /**
  * Open (or create) the telemetry SQLite database and ensure the schema.
  *
- * `dbPath` defaults to `TELEMETRY_DB_PATH` (env) or the on-disk
- * `logs/telemetry.db`. Point `TELEMETRY_DB_PATH` at a location OUTSIDE the deploy
- * tree (e.g. `/var/lib/claude-plan-api/telemetry.db`) so a redeploy that cleans
- * the working directory does not wipe the store — `logs/` is gitignored. Pass
- * `":memory:"` for deterministic, isolated tests (no disk I/O). Any other path
- * is treated as a file and its parent directory is created.
+ * `dbPath` defaults to `getTelemetryDbPath()` — the shared resolver used by the
+ * server AND the CLI scripts, so they never open different databases. It reads
+ * `TELEMETRY_DB_PATH` (set OUTSIDE the deploy tree in production, e.g.
+ * `/var/lib/claude-plan-api/telemetry.db`) or falls back to `logs/telemetry.db`.
+ * Pass `":memory:"` for deterministic, isolated tests (no disk I/O). Any other
+ * path is treated as a file and its parent directory is created.
  */
-export function initStorage(
-  dbPath: string = Bun.env.TELEMETRY_DB_PATH || "logs/telemetry.db",
-): void {
+export function initStorage(dbPath: string = getTelemetryDbPath()): void {
   if (dbPath !== ":memory:") {
     mkdirSync(dirname(dbPath), { recursive: true });
   }
