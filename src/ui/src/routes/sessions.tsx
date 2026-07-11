@@ -9,12 +9,14 @@ import {
 import { useMemo } from "react"
 
 import { listApiKeys, listRequests } from "@/lib/api"
-import { groupIntoConversations } from "@/lib/sessions"
+import { groupIntoConversations, sortConversations, type ConversationSort } from "@/lib/sessions"
 import { formatRelativeTime, formatTokens, truncate } from "@/lib/format"
+import { dayEndUtcIso, dayStartUtcIso } from "@/lib/date-range"
 
 import { ApiKeySelect } from "@/components/layout/api-key-select"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
@@ -26,11 +28,44 @@ import {
 } from "@/components/ui/empty"
 import { ModelBadge } from "@/components/layout/status-badge"
 import { RouteError } from "@/components/layout/route-error"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 
 // Typed search params from URL — mirrors the Requests route so `/keys/$keyId`
 // can deep-link here with `?apiKeyId=<id>` and pre-filter the session list.
 type SessionsSearch = {
   apiKeyId?: number
+  model?: string
+  from?: string
+  to?: string
+  sort?: ConversationSort
+}
+
+// `from`/`to` must be a bare `YYYY-MM-DD` — anything else (malformed, empty,
+// wrong shape) degrades to `undefined` rather than being passed through. An
+// unvalidated string like `?from=abc` would otherwise flow straight into
+// `listRequests` and silently produce a query that returns zero rows forever
+// (indistinguishable from a legitimate empty result) instead of just being
+// dropped.
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+export function parseDateOnly(value: unknown): string | undefined {
+  if (typeof value !== "string" || !DATE_ONLY_PATTERN.test(value)) return undefined
+
+  // The regex only checks shape (`\d{4}-\d{2}-\d{2}`); it happily matches
+  // calendar-invalid dates like `2026-02-30` or `2026-13-01`. Those then
+  // silently roll over through `Date.UTC` (`2026-02-30` -> `2026-03-02`)
+  // instead of being rejected, so the query would run against the WRONG day
+  // rather than being dropped — defeating the point of validating at this
+  // trust boundary. Round-trip through `Date.UTC` and reject anything that
+  // doesn't come back exactly as parsed (standard rollover-detection idiom).
+  const [year, month, day] = value.split("-").map(Number)
+  const roundTrip = new Date(Date.UTC(year, month - 1, day))
+  const isValidCalendarDate =
+    roundTrip.getUTCFullYear() === year &&
+    roundTrip.getUTCMonth() === month - 1 &&
+    roundTrip.getUTCDate() === day
+
+  return isValidCalendarDate ? value : undefined
 }
 
 export const Route = createFileRoute("/sessions")({
@@ -39,27 +74,45 @@ export const Route = createFileRoute("/sessions")({
   validateSearch: (search): SessionsSearch => {
     const raw = Number(search.apiKeyId)
     const apiKeyId = Number.isInteger(raw) && raw >= 0 ? raw : undefined
-    return { apiKeyId }
+    const model = typeof search.model === "string" && search.model.length > 0 ? search.model : undefined
+    const from = parseDateOnly(search.from)
+    const to = parseDateOnly(search.to)
+    const sort = search.sort === "tokens" ? "tokens" : search.sort === "recent" ? "recent" : undefined
+    return { apiKeyId, model, from, to, sort }
   },
 })
 
 function SessionsPage() {
-  // The key filter lives in the URL (`?apiKeyId=`) so it is shareable and
-  // deep-linkable from `/keys/$keyId`. `apiKeyId` is part of the query key so
-  // changing it triggers a re-fetch, and the filtered request set feeds
-  // `groupIntoConversations` before grouping.
-  const { apiKeyId } = Route.useSearch()
+  // Filters live in the URL (`?apiKeyId=&model=&from=&to=&sort=`) so they are
+  // shareable and deep-linkable from `/keys/$keyId`. They're part of the query
+  // key so changing any of them triggers a re-fetch; the filtered request set
+  // feeds `groupIntoConversations` then `sortConversations`.
+  const { apiKeyId, model, from, to, sort = "recent" } = Route.useSearch()
   const navigate = useNavigate({ from: Route.fullPath })
-  const setApiKeyId = (next: number | undefined) => {
-    void navigate({ search: () => ({ apiKeyId: next }), replace: true })
+
+  function updateSearch(next: Partial<SessionsSearch>) {
+    void navigate({
+      search: () => ({ apiKeyId, model, from, to, sort, ...next }),
+      replace: true,
+    })
   }
 
   const query = useQuery({
-    queryKey: ["requests", "all-chat-completions", apiKeyId ?? "all"],
+    queryKey: [
+      "requests",
+      "all-chat-completions",
+      apiKeyId ?? "all",
+      model ?? "all",
+      from ?? "any",
+      to ?? "any",
+    ],
     queryFn: () =>
       listRequests({
         path: "/v1/chat/completions",
         apiKeyId,
+        model,
+        from: from ? dayStartUtcIso(from) : undefined,
+        to: to ? dayEndUtcIso(to) : undefined,
         limit: 500,
         order: "desc",
       }),
@@ -72,10 +125,21 @@ function SessionsPage() {
   })
   const apiKeys = keysQuery.data?.keys ?? []
 
+  // Collect distinct models seen in the current result set for the filter
+  // chips — mirrors `IndexPage`'s `knownModels` in routes/index.tsx, including
+  // its known limitation: once a model is selected the chip list narrows to
+  // just that model until it's cleared again.
+  const knownModels = useMemo(() => {
+    if (!query.data) return []
+    const set = new Set<string>()
+    for (const r of query.data.requests) if (r.model) set.add(r.model)
+    return [...set].sort()
+  }, [query.data])
+
   const conversations = useMemo(() => {
     if (!query.data) return []
-    return groupIntoConversations(query.data.requests)
-  }, [query.data])
+    return sortConversations(groupIntoConversations(query.data.requests), sort)
+  }, [query.data, sort])
 
   return (
     <div className="container mx-auto flex flex-col gap-4 p-4 sm:p-6">
@@ -91,11 +155,65 @@ function SessionsPage() {
         </p>
       </header>
 
-      {apiKeys.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <ApiKeySelect apiKeys={apiKeys} value={apiKeyId} onChange={setApiKeyId} />
+      <div className="flex flex-wrap items-center gap-2">
+        {apiKeys.length > 0 && (
+          <ApiKeySelect
+            apiKeys={apiKeys}
+            value={apiKeyId}
+            onChange={(next) => updateSearch({ apiKeyId: next })}
+          />
+        )}
+
+        {knownModels.length > 0 && (
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            value={model ?? ""}
+            onValueChange={(v) => updateSearch({ model: v === "" ? undefined : v })}
+            aria-label="Model filter"
+            className="flex-wrap"
+          >
+            {knownModels.map((m) => (
+              <ToggleGroupItem key={m} value={m} className="font-mono text-xs">
+                {m}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        )}
+
+        <div className="flex items-center gap-1.5">
+          <Input
+            type="date"
+            value={from ?? ""}
+            onChange={(e) => updateSearch({ from: e.target.value || undefined })}
+            aria-label="From date"
+            className="w-auto"
+          />
+          <span className="text-muted-foreground text-xs">to</span>
+          <Input
+            type="date"
+            value={to ?? ""}
+            onChange={(e) => updateSearch({ to: e.target.value || undefined })}
+            aria-label="To date"
+            className="w-auto"
+          />
         </div>
-      )}
+
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          value={sort}
+          onValueChange={(v) => {
+            if (v === "recent" || v === "tokens") updateSearch({ sort: v })
+          }}
+          aria-label="Sort conversations"
+        >
+          <ToggleGroupItem value="recent">Most recent</ToggleGroupItem>
+          <ToggleGroupItem value="tokens">Most tokens</ToggleGroupItem>
+        </ToggleGroup>
+      </div>
 
       {query.isError && (
         <Alert variant="destructive">

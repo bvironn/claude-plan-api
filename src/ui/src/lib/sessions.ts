@@ -180,5 +180,28 @@ export function groupIntoConversations(
   )
 }
 
+// ---------------------------------------------------------------------------
+// Sorting
+// ---------------------------------------------------------------------------
+
+export type ConversationSort = "recent" | "tokens"
+
+/** Returns a new array — never mutates `conversations`. */
+export function sortConversations(
+  conversations: Conversation[],
+  sort: ConversationSort,
+): Conversation[] {
+  const copy = [...conversations]
+  if (sort === "tokens") {
+    return copy.sort(
+      (a, b) =>
+        b.totalInputTokens + b.totalOutputTokens - (a.totalInputTokens + a.totalOutputTokens),
+    )
+  }
+  return copy.sort(
+    (a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
+  )
+}
+
 // Re-export CONTEXT_PREAMBLE_MARKER in case callers want to trim their own displays.
 export { CONTEXT_PREAMBLE_MARKER }
