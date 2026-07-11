@@ -115,6 +115,7 @@ function KeyDetailPage() {
             revoked={apiKey.revoked_at != null}
             isAdmin={apiKey.is_admin === 1}
             createdAt={apiKey.created_at}
+            rotatedAt={apiKey.rotated_at ?? null}
           />
 
           <DeepLinks keyId={apiKey.id} />
@@ -153,12 +154,14 @@ function MetadataCard({
   revoked,
   isAdmin,
   createdAt,
+  rotatedAt,
 }: {
   prefix: string
   label: string
   revoked: boolean
   isAdmin: boolean
   createdAt: string
+  rotatedAt: string | null
 }) {
   return (
     <Card>
@@ -180,6 +183,7 @@ function MetadataCard({
       </CardHeader>
       <CardContent className="text-muted-foreground text-xs">
         Created {formatRelativeTime(createdAt)}
+        {rotatedAt && <> · Rotated {formatRelativeTime(rotatedAt)}</>}
       </CardContent>
     </Card>
   )

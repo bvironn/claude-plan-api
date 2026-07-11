@@ -184,6 +184,8 @@ export interface ApiKeyMeta {
    * UI can never create or toggle admin status; only the CLI mints admin keys.
    */
   is_admin: number
+  /** UTC ISO timestamp of the most recent rotation; `null`/absent means never rotated. */
+  rotated_at?: string | null
 }
 
 export interface ApiKeyListResponse {
@@ -222,6 +224,33 @@ export function revokeApiKey(id: number): Promise<{ revoked: boolean }> {
  */
 export function renameApiKey(id: number, label: string): Promise<ApiKeyMeta> {
   return patchJson<ApiKeyMeta>(`/api/keys/${id}`, { label })
+}
+
+/**
+ * Rotate response — the ONLY place the fresh plaintext key (`full`) is ever
+ * returned for an EXISTING key. Mirrors `CreatedApiKey`'s one-time-secret
+ * contract, plus `rotated_at` recording when the swap happened. Never carries
+ * `key_hash` or the prior plaintext.
+ */
+export interface RotatedApiKey {
+  id: number
+  prefix: string
+  label: string
+  created_at: string
+  revoked_at: string | null
+  rotated_at: string
+  full: string
+}
+
+/**
+ * Rotate an existing key's secret in place (same `id`, fresh `prefix` +
+ * secret). POSTs `/api/keys/:id/rotate` with no body and returns the
+ * one-time-reveal DTO. The backend restricts this to ACTIVE keys: a revoked
+ * key yields 409 and an unknown id yields 404, both surfaced as a thrown
+ * `Error` here (matches `renameApiKey`).
+ */
+export function rotateApiKey(id: number): Promise<RotatedApiKey> {
+  return postJson<RotatedApiKey>(`/api/keys/${id}/rotate`)
 }
 
 // ---------------------------------------------------------------------------

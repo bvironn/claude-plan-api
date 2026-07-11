@@ -6,6 +6,7 @@ import {
   KeyRoundIcon,
   PencilIcon,
   PlusIcon,
+  RotateCwIcon,
   ShieldOffIcon,
 } from "lucide-react"
 import { useMemo, useState, type FormEvent } from "react"
@@ -16,11 +17,18 @@ import {
   listApiKeys,
   renameApiKey,
   revokeApiKey,
+  rotateApiKey,
   type ApiKeyMeta,
   type CreatedApiKey,
   type UsageByKey,
 } from "@/lib/api"
 import { isStoredKeyPrefix } from "@/lib/auth"
+import {
+  dismissRotateReveal,
+  isSelfLockoutTarget,
+  revealRotatedKey,
+  ROTATE_REVEAL_INITIAL,
+} from "@/lib/rotate-key"
 import { formatRelativeTime, formatTokens } from "@/lib/format"
 
 import { Badge } from "@/components/ui/badge"
@@ -100,6 +108,7 @@ function KeysPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [revokeTarget, setRevokeTarget] = useState<ApiKeyMeta | null>(null)
+  const [rotateTarget, setRotateTarget] = useState<ApiKeyMeta | null>(null)
 
   const keys = keysQuery.data?.keys ?? []
 
@@ -143,11 +152,13 @@ function KeysPage() {
           keys={keys}
           usageByKeyId={usageByKeyId}
           onRevoke={setRevokeTarget}
+          onRotate={setRotateTarget}
         />
       )}
 
       <CreateKeyDialog open={createOpen} onOpenChange={setCreateOpen} />
       <RevokeKeyDialog target={revokeTarget} onClose={() => setRevokeTarget(null)} />
+      <RotateKeyDialog target={rotateTarget} onClose={() => setRotateTarget(null)} />
     </div>
   )
 }
@@ -160,10 +171,12 @@ function KeysTable({
   keys,
   usageByKeyId,
   onRevoke,
+  onRotate,
 }: {
   keys: ApiKeyMeta[]
   usageByKeyId: Map<number, UsageByKey>
   onRevoke: (key: ApiKeyMeta) => void
+  onRotate: (key: ApiKeyMeta) => void
 }) {
   return (
     <div className="border-border overflow-hidden rounded-md border">
@@ -175,7 +188,7 @@ function KeysTable({
             <TableHead className="w-[130px]">Created</TableHead>
             <TableHead className="w-[170px] text-right">Usage</TableHead>
             <TableHead className="w-[90px]">Status</TableHead>
-            <TableHead className="w-[110px] text-right">Actions</TableHead>
+            <TableHead className="w-[170px] text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -185,6 +198,7 @@ function KeysTable({
               apiKey={k}
               usage={usageByKeyId.get(k.id)}
               onRevoke={onRevoke}
+              onRotate={onRotate}
             />
           ))}
         </TableBody>
@@ -197,10 +211,12 @@ function KeyRow({
   apiKey,
   usage,
   onRevoke,
+  onRotate,
 }: {
   apiKey: ApiKeyMeta
   usage: UsageByKey | undefined
   onRevoke: (key: ApiKeyMeta) => void
+  onRotate: (key: ApiKeyMeta) => void
 }) {
   const revoked = apiKey.revoked_at != null
   const totalTokens = usage ? usage.tokens_in + usage.tokens_out : 0
@@ -255,6 +271,15 @@ function KeyRow({
         )}
       </TableCell>
       <TableCell className="text-right">
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={revoked}
+          onClick={() => onRotate(apiKey)}
+        >
+          <RotateCwIcon data-icon="inline-start" />
+          Rotate
+        </Button>
         <Button
           variant="ghost"
           size="sm"
@@ -501,9 +526,10 @@ function RevokeKeyDialog({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Reuse the null-guarded self-lockout compare from auth.ts (never derives the
-  // prefix inline). True only when the row matches the currently-stored key.
-  const selfLockout = target != null && isStoredKeyPrefix(target.prefix)
+  // Shared, unit-tested self-lockout predicate (rotate-key.ts) — the same one
+  // RotateKeyDialog uses. True only when the row matches the currently-stored
+  // key, so revoking it would log the dashboard out.
+  const selfLockout = isSelfLockoutTarget(target)
 
   function handleOpenChange(open: boolean) {
     if (!open) {
@@ -579,6 +605,142 @@ function RevokeKeyDialog({
             {submitting ? "Revoking…" : "Revoke key"}
           </Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Rotate dialog — confirm (with self-lockout warning) → one-time reveal
+// ---------------------------------------------------------------------------
+// Two steps in one dialog: `reveal.revealed === false` shows the confirm step
+// (mirrors RevokeKeyDialog, including the self-lockout warning); a successful
+// rotate flips to `reveal.revealed === true` and shows the fresh plaintext
+// exactly once (mirrors CreateKeyDialog). Both transitions are pure functions
+// from `lib/rotate-key.ts` so the state logic is unit-tested independent of
+// this component.
+
+function RotateKeyDialog({
+  target,
+  onClose,
+}: {
+  target: ApiKeyMeta | null
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [reveal, setReveal] = useState(ROTATE_REVEAL_INITIAL)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const selfLockout = isSelfLockoutTarget(target)
+
+  function reset() {
+    setReveal(dismissRotateReveal())
+    setSubmitting(false)
+    setError(null)
+  }
+
+  function handleOpenChange(open: boolean) {
+    if (!open) {
+      // A rotation already happened → refresh the list/usage so the new
+      // prefix and rotated_at are visible (mirrors CreateKeyDialog's close).
+      if (reveal.revealed) {
+        void queryClient.invalidateQueries({ queryKey: ["keys"] })
+        void queryClient.invalidateQueries({ queryKey: ["keys-usage"] })
+      }
+      reset()
+      onClose()
+    }
+  }
+
+  async function handleRotate() {
+    if (!target) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const rotated = await rotateApiKey(target.id)
+      setReveal(revealRotatedKey(rotated.full))
+      setSubmitting(false)
+    } catch (err) {
+      setError((err as Error).message)
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Dialog open={target != null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <RotateCwIcon />
+            {reveal.revealed ? "Key rotated" : "Rotate this key?"}
+          </DialogTitle>
+          <DialogDescription>
+            {reveal.revealed
+              ? "Copy your new key now. This is the only time it is shown."
+              : target && (
+                  <>
+                    Rotating <span className="font-mono">{target.prefix}</span>{" "}
+                    ({target.label}) immediately invalidates its current secret
+                    and issues a new one. The key's id, history, and privilege
+                    level are unchanged.
+                  </>
+                )}
+          </DialogDescription>
+        </DialogHeader>
+
+        {reveal.revealed ? (
+          <div className="flex flex-col gap-3">
+            <Alert>
+              <AlertTriangleIcon />
+              <AlertTitle>Save this key now</AlertTitle>
+              <AlertDescription>
+                The new key is shown only once. Store it somewhere safe —
+                you can't retrieve it again, only rotate it again to issue a
+                fresh one.
+              </AlertDescription>
+            </Alert>
+            <div className="bg-muted flex items-center gap-2 rounded-md p-2">
+              <code className="flex-1 overflow-x-auto font-mono text-xs">
+                {reveal.full}
+              </code>
+              <CopyButton value={reveal.full} label="Copy key" />
+            </div>
+            <DialogFooter>
+              <Button onClick={() => handleOpenChange(false)}>Done</Button>
+            </DialogFooter>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {selfLockout && (
+              <Alert variant="destructive">
+                <AlertTriangleIcon />
+                <AlertTitle>This is the key you're currently using</AlertTitle>
+                <AlertDescription>
+                  Rotating it will log this dashboard out immediately. Save
+                  the new key from this dialog to sign back in.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertCircleIcon />
+                <AlertTitle>Couldn't rotate key</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <DialogFooter>
+              <Button variant="outline" onClick={onClose} disabled={submitting}>
+                Cancel
+              </Button>
+              <Button onClick={handleRotate} disabled={submitting}>
+                {submitting ? "Rotating…" : "Rotate key"}
+              </Button>
+            </DialogFooter>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   )
