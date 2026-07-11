@@ -6,12 +6,13 @@ import {
   MessageSquareIcon,
   MessagesSquareIcon,
 } from "lucide-react"
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 
-import { listRequests } from "@/lib/api"
+import { listApiKeys, listRequests } from "@/lib/api"
 import { groupIntoConversations } from "@/lib/sessions"
 import { formatRelativeTime, formatTokens, truncate } from "@/lib/format"
 
+import { ApiKeySelect } from "@/components/layout/api-key-select"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -32,16 +33,29 @@ export const Route = createFileRoute("/sessions")({
 })
 
 function SessionsPage() {
+  // Sessions has no URL-param infra (unlike Requests), so the key filter is
+  // held in local React state per the change's design choice. `apiKeyId` is
+  // part of the query key so selecting a key triggers a re-fetch, and the
+  // filtered request set feeds `groupIntoConversations` before grouping.
+  const [apiKeyId, setApiKeyId] = useState<number | undefined>(undefined)
+
   const query = useQuery({
-    queryKey: ["requests", "all-chat-completions"],
+    queryKey: ["requests", "all-chat-completions", apiKeyId ?? "all"],
     queryFn: () =>
       listRequests({
         path: "/v1/chat/completions",
+        apiKeyId,
         limit: 500,
         order: "desc",
       }),
     refetchInterval: 10_000,
   })
+
+  const keysQuery = useQuery({
+    queryKey: ["api-keys"],
+    queryFn: () => listApiKeys(),
+  })
+  const apiKeys = keysQuery.data?.keys ?? []
 
   const conversations = useMemo(() => {
     if (!query.data) return []
@@ -61,6 +75,12 @@ function SessionsPage() {
           to open the latest turn (contains the richest history).
         </p>
       </header>
+
+      {apiKeys.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <ApiKeySelect apiKeys={apiKeys} value={apiKeyId} onChange={setApiKeyId} />
+        </div>
+      )}
 
       {query.isError && (
         <Alert variant="destructive">

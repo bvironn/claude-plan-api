@@ -306,6 +306,7 @@ export interface RequestFilters {
   path?: string;
   traceId?: string;
   model?: string;
+  apiKeyId?: number;
   timeFrom?: string;
   timeTo?: string;
   minDuration?: number;
@@ -324,6 +325,7 @@ function buildRequestWhere(filters: RequestFilters): { where: string; vals: SQLQ
   if (filters.path) { conds.push("path = ?"); vals.push(filters.path); }
   if (filters.traceId) { conds.push("trace_id = ?"); vals.push(filters.traceId); }
   if (filters.model) { conds.push("model = ?"); vals.push(filters.model); }
+  if (filters.apiKeyId != null) { conds.push("api_key_id = ?"); vals.push(filters.apiKeyId); }
   if (filters.timeFrom) { conds.push("timestamp >= ?"); vals.push(filters.timeFrom); }
   if (filters.timeTo) { conds.push("timestamp <= ?"); vals.push(filters.timeTo); }
   if (filters.minDuration != null) { conds.push("duration_ms >= ?"); vals.push(filters.minDuration); }

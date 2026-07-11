@@ -1,8 +1,10 @@
 import { FilterIcon, SearchIcon, XIcon } from "lucide-react"
 
+import type { ApiKeyMeta } from "@/lib/api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ApiKeySelect } from "@/components/layout/api-key-select"
 import {
   ToggleGroup,
   ToggleGroupItem,
@@ -13,19 +15,22 @@ export interface RequestsFilterState {
   search?: string
   statusClass?: "2xx" | "4xx" | "5xx"
   model?: string
+  apiKeyId?: number
 }
 
 interface RequestsFiltersProps {
   value: RequestsFilterState
   onChange: (next: RequestsFilterState) => void
   models: string[]
+  apiKeys: ApiKeyMeta[]
 }
 
-export function RequestsFilters({ value, onChange, models }: RequestsFiltersProps) {
+export function RequestsFilters({ value, onChange, models, apiKeys }: RequestsFiltersProps) {
   const active =
     (value.search && value.search.length > 0 ? 1 : 0) +
     (value.statusClass ? 1 : 0) +
-    (value.model ? 1 : 0)
+    (value.model ? 1 : 0) +
+    (value.apiKeyId != null ? 1 : 0)
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -85,13 +90,22 @@ export function RequestsFilters({ value, onChange, models }: RequestsFiltersProp
         </ToggleGroup>
       )}
 
+      {/* API key */}
+      {apiKeys.length > 0 && (
+        <ApiKeySelect
+          apiKeys={apiKeys}
+          value={value.apiKeyId}
+          onChange={(apiKeyId) => onChange({ ...value, apiKeyId })}
+        />
+      )}
+
       {/* Reset + active badge */}
       {active > 0 ? (
         <Button
           variant="ghost"
           size="sm"
           onClick={() =>
-            onChange({ search: undefined, statusClass: undefined, model: undefined })
+            onChange({ search: undefined, statusClass: undefined, model: undefined, apiKeyId: undefined })
           }
         >
           <XIcon data-icon="inline-start" />

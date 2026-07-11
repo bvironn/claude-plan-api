@@ -37,6 +37,7 @@ function toCamel(r: Record<string, unknown>): Record<string, unknown> {
     error: r.error,
     ip: r.ip,
     userAgent: r.user_agent,
+    apiKeyId: r.api_key_id ?? undefined,
   };
 }
 
@@ -56,12 +57,18 @@ async function _handleTelemetryRequests(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const p = url.searchParams;
 
+  // Guard `apiKeyId` with the shared numeric parser (NOT bare parseFloat): an
+  // invalid/negative/absent value resolves to the -1 sentinel, which we treat
+  // as "no filter" so a bad param never leaks NaN into `api_key_id = ?`.
+  const apiKeyIdRaw = parseNum(p.get("apiKeyId"), -1);
+
   const filters: RequestFilters = {
     status: parseCsvInt(p.get("status")),
     method: p.get("method") ?? undefined,
     path: p.get("path") ?? undefined,
     traceId: p.get("traceId") ?? undefined,
     model: p.get("model") ?? undefined,
+    apiKeyId: apiKeyIdRaw >= 0 ? apiKeyIdRaw : undefined,
     timeFrom: p.get("from") ?? undefined,
     timeTo: p.get("to") ?? undefined,
     minDuration: p.get("minDuration") ? parseFloat(p.get("minDuration")!) : undefined,
