@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { handleRequest } from "../src/http/server.ts";
 import * as storage from "../src/observability/storage.ts";
 import * as modelsDomain from "../src/domain/models.ts";
+import { hashKey } from "../src/domain/api-keys.ts";
 import type { ApiKeyRecord } from "../src/observability/types.ts";
 
 /**
@@ -490,6 +491,82 @@ describe("dispatch — enforcement ON: admin-scoped /api/* gating", () => {
     expect(res.status).toBe(403);
     // Gate short-circuits before dispatch → no revoke happens.
     expect(rev).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REQUIRE_API_KEY=true → POST /api/keys/:id/rotate (sc1: old key invalidated
+// instantly, new key authenticates). Uses REAL generateKey()/hashKey() (not
+// stubbed) so this proves the actual auth digest flips, not just that the
+// route "looks" rotated — the strongest possible sc1 assertion.
+// ---------------------------------------------------------------------------
+
+describe("dispatch — enforcement ON: POST /api/keys/:id/rotate invalidates the old key and authenticates the new one", () => {
+  it("old key → 401 and new (returned) key → 200 immediately after rotation (sc1)", async () => {
+    enable(); // sets REQUIRE_API_KEY=true, API_KEY_PEPPER=test-pepper
+    stubInsertRequest();
+    stubUpdateRequest();
+
+    const OLD_FULL = "cpk_deadbeef.old-secret";
+    let currentHash = hashKey(OLD_FULL); // real digest under the test pepper
+    let currentPrefix = "cpk_deadbeef";
+
+    push(
+      spyOn(storage, "getApiKeyByHash").mockImplementation((hash: string) =>
+        hash === currentHash
+          ? {
+              id: 7,
+              prefix: currentPrefix,
+              key_hash: currentHash,
+              label: "ci-runner",
+              created_at: "2026-01-01T00:00:00Z",
+              revoked_at: null,
+              is_admin: 1,
+            }
+          : null
+      )
+    );
+    push(
+      spyOn(storage, "listApiKeys").mockImplementation(() => [
+        { id: 7, prefix: currentPrefix, label: "ci-runner", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1 },
+      ])
+    );
+    push(
+      spyOn(storage, "rotateApiKey").mockImplementation((_id, prefix, keyHash) => {
+        currentHash = keyHash;
+        currentPrefix = prefix;
+        return true;
+      })
+    );
+
+    // Rotate using the OLD key as the authenticating admin Bearer token.
+    const rotateRes = await handleRequest(
+      new Request("http://localhost/api/keys/7/rotate", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OLD_FULL}` },
+      })
+    );
+    expect(rotateRes.status).toBe(200);
+    const body = (await rotateRes.json()) as { full: string };
+    expect(typeof body.full).toBe("string");
+    expect(body.full).not.toBe(OLD_FULL);
+
+    // OLD key is now rejected — instant invalidation, no grace window.
+    const oldRes = await handleRequest(
+      new Request("http://localhost/api/keys", {
+        headers: { Authorization: `Bearer ${OLD_FULL}` },
+      })
+    );
+    expect(oldRes.status).toBe(401);
+
+    // NEW key authenticates and reaches the handler (still admin — is_admin
+    // was never touched by rotateApiKey's SET clause).
+    const newRes = await handleRequest(
+      new Request("http://localhost/api/keys", {
+        headers: { Authorization: `Bearer ${body.full}` },
+      })
+    );
+    expect(newRes.status).toBe(200);
   });
 });
 
