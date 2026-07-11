@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, Link } from "@tanstack/react-router"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   AlertCircleIcon,
@@ -209,7 +209,11 @@ function KeyRow({
   return (
     <TableRow className={revoked ? "opacity-60" : undefined}>
       <TableCell className="font-mono text-xs">
-        <div className="flex items-center gap-1.5">
+        <Link
+          to="/keys/$keyId"
+          params={{ keyId: String(apiKey.id) }}
+          className="flex items-center gap-1.5 hover:underline"
+        >
           {apiKey.prefix}
           {apiKey.is_admin === 1 && (
             <Badge className="font-normal">Admin</Badge>
@@ -219,7 +223,7 @@ function KeyRow({
               this session
             </Badge>
           )}
-        </div>
+        </Link>
       </TableCell>
       <TableCell className="text-sm">
         <KeyLabelCell apiKey={apiKey} disabled={revoked} />
