@@ -9,10 +9,9 @@ import { isStoredKeyPrefix } from "./auth"
 
 /**
  * True when `target` is the key currently authenticating this dashboard
- * session — rotating it would immediately log the dashboard out. Mirrors
- * `RevokeKeyDialog`'s inline `selfLockout` guard (`target != null &&
- * isStoredKeyPrefix(target.prefix)`), extracted here so both dialogs share
- * one tested implementation.
+ * session — rotating (or revoking) it would immediately log the dashboard
+ * out. Both `RotateKeyDialog` and `RevokeKeyDialog` call this one tested
+ * predicate rather than deriving the prefix compare inline.
  */
 export function isSelfLockoutTarget(target: ApiKeyMeta | null): boolean {
   return target != null && isStoredKeyPrefix(target.prefix)

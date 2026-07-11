@@ -526,9 +526,10 @@ function RevokeKeyDialog({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Reuse the null-guarded self-lockout compare from auth.ts (never derives the
-  // prefix inline). True only when the row matches the currently-stored key.
-  const selfLockout = target != null && isStoredKeyPrefix(target.prefix)
+  // Shared, unit-tested self-lockout predicate (rotate-key.ts) — the same one
+  // RotateKeyDialog uses. True only when the row matches the currently-stored
+  // key, so revoking it would log the dashboard out.
+  const selfLockout = isSelfLockoutTarget(target)
 
   function handleOpenChange(open: boolean) {
     if (!open) {
