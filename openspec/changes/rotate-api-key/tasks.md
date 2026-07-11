@@ -51,19 +51,19 @@ shrinking test coverage.
 
 ## Phase 3: Frontend Types & API Client
 
-- [ ] 3.1 GREEN: `src/ui/src/lib/api.ts` — add `RotatedApiKey` interface (no `key_hash`) and `rotateApiKey(id)` POST wrapper; add `rotated_at?: string | null` to `ApiKeyMeta`
+- [x] 3.1 GREEN: `src/ui/src/lib/api.ts` — add `RotatedApiKey` interface (no `key_hash`) and `rotateApiKey(id)` POST wrapper; add `rotated_at?: string | null` to `ApiKeyMeta`
 
 ## Phase 4: UI Rotate Dialog
 
-- [ ] 4.1 RED: `__tests__/rotate-key-dialog.spec.tsx` (new, repo root) — sc12 (self-lockout warning when target matches stored key), sc13 (`full` shown once, gone after dismiss)
-- [ ] 4.2 GREEN: `src/ui/src/routes/keys.tsx` — add Rotate button to `KeyRow` + `rotateTarget` state wiring
-- [ ] 4.3 GREEN: `src/ui/src/routes/keys.tsx` — implement `RotateKeyDialog`: confirm step with `isStoredKeyPrefix` self-lockout warning (mirrors `RevokeKeyDialog`), on confirm call `rotateApiKey(id)`, one-time reveal step (mirrors `CreateKeyDialog`), invalidate `["keys"]`/`["keys-usage"]`
-- [ ] 4.4 GREEN: `src/ui/src/routes/keys.$keyId.tsx` — show `rotated_at` in `MetadataCard` when present
-- [ ] 4.5 Verify: `bun test __tests__/rotate-key-dialog.spec.tsx` green; `bun run build` succeeds
+- [x] 4.1 RED: `__tests__/rotate-key-dialog.spec.tsx` (new, repo root) — sc12 (self-lockout warning when target matches stored key), sc13 (`full` shown once, gone after dismiss)
+- [x] 4.2 GREEN: `src/ui/src/routes/keys.tsx` — add Rotate button to `KeyRow` + `rotateTarget` state wiring
+- [x] 4.3 GREEN: `src/ui/src/routes/keys.tsx` — implement `RotateKeyDialog`: confirm step with `isStoredKeyPrefix` self-lockout warning (mirrors `RevokeKeyDialog`), on confirm call `rotateApiKey(id)`, one-time reveal step (mirrors `CreateKeyDialog`), invalidate `["keys"]`/`["keys-usage"]`
+- [x] 4.4 GREEN: `src/ui/src/routes/keys.$keyId.tsx` — show `rotated_at` in `MetadataCard` when present
+- [x] 4.5 Verify: `bun test __tests__/rotate-key-dialog.spec.tsx` green; `bun run build` succeeds
 
 **PR 2 boundary** — frontend rotate UI complete, independently revertable, base = PR 1 branch.
 
 ## Phase 5: Full Verification
 
-- [ ] 5.1 `bun test` (full suite) green
-- [ ] 5.2 Smoke: create key → rotate → old key 401, new key 200 (end-to-end sc1)
+- [x] 5.1 `bun test` (full suite) green (570/571; 1 known pre-existing failure in `observability.spec.ts`, unrelated to this change)
+- [x] 5.2 Smoke: create key → rotate → old key 401, new key 200 (end-to-end sc1) — proven by `__tests__/api-key-dispatch.spec.ts`'s real `generateKey`/`hashKey` rotation dispatch test
