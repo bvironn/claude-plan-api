@@ -24,6 +24,7 @@
  */
 
 import { brotliCompressSync } from "node:zlib";
+import { emit } from "../observability/logger.ts";
 
 /**
  * Base (parameter-stripped) content types eligible for compression. Text-like
@@ -106,18 +107,53 @@ export async function maybeCompress(req: Request, res: Response): Promise<Respon
   // Eligible + buffered: read the in-memory body and compress it. `isNegotiable`
   // already excluded streaming/attachment responses, so this never drains a
   // live stream.
-  const raw = new Uint8Array(await res.arrayBuffer());
-  const compressed = encoding === "br" ? brotliCompressSync(raw) : Bun.gzipSync(raw);
+  let raw: Uint8Array<ArrayBuffer>;
+  try {
+    raw = new Uint8Array(await res.arrayBuffer());
+  } catch (err) {
+    // Body read itself failed — nothing recoverable to fall back to, but a
+    // compression-layer failure must never mask itself as a 500. Surface the
+    // original (now-drained) response rather than throwing.
+    emit("warn", "http.compression.failed", {
+      encoding,
+      stage: "read",
+      error: (err as Error).message,
+    });
+    return res;
+  }
 
-  const headers = new Headers(res.headers);
-  headers.set("Content-Encoding", encoding);
-  addVaryAcceptEncoding(headers);
-  // Stale for the compressed buffer — Bun recomputes Content-Length on send.
-  headers.delete("Content-Length");
+  // A compression failure (e.g. a corrupt buffer edge case in the native
+  // brotli/gzip bindings) must never discard an already-successful upstream
+  // response. Fall back to the original, uncompressed bytes instead of
+  // letting the error propagate up into `handleRequest`'s outer catch, which
+  // would turn a valid 200 into a generic 500.
+  try {
+    const compressed = encoding === "br" ? brotliCompressSync(raw) : Bun.gzipSync(raw);
 
-  return new Response(compressed, {
-    status: res.status,
-    statusText: res.statusText,
-    headers,
-  });
+    const headers = new Headers(res.headers);
+    headers.set("Content-Encoding", encoding);
+    addVaryAcceptEncoding(headers);
+    // Stale for the compressed buffer — Bun recomputes Content-Length on send.
+    headers.delete("Content-Length");
+
+    return new Response(compressed, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    });
+  } catch (err) {
+    emit("warn", "http.compression.failed", {
+      encoding,
+      stage: "compress",
+      error: (err as Error).message,
+    });
+    // res.body was already drained by arrayBuffer() above, so reconstruct
+    // the original uncompressed response from the bytes we already read
+    // rather than returning the now-empty `res`.
+    return new Response(raw, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
+  }
 }

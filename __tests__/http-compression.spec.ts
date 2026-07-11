@@ -195,6 +195,76 @@ describe("maybeCompress — exclusions", () => {
 });
 
 // ---------------------------------------------------------------------------
+// RESIL-001 — compression failures must never turn a valid response into a 500
+// ---------------------------------------------------------------------------
+
+describe("maybeCompress — resilience: compressor throws", () => {
+  it("falls back to the original uncompressed 200 body when Bun.gzipSync throws", async () => {
+    const payload = { ok: true, data: "some payload that would normally be compressed" };
+    const originalBytes = new Uint8Array(await jsonResponse(payload).arrayBuffer());
+
+    const gzipSpy = spyOn(Bun, "gzipSync").mockImplementation(() => {
+      throw new Error("gzip exploded");
+    });
+
+    try {
+      const out = await maybeCompress(reqWith("gzip"), jsonResponse(payload));
+
+      // Must NOT propagate/throw, must NOT become a 500 — the original
+      // successful response is returned uncompressed instead.
+      expect(out.status).toBe(200);
+      expect(out.headers.get("Content-Encoding")).toBeNull();
+      const bodyOut = new Uint8Array(await out.arrayBuffer());
+      expect(Buffer.from(bodyOut).equals(Buffer.from(originalBytes))).toBe(true);
+    } finally {
+      gzipSpy.mockRestore();
+    }
+  });
+
+  it("falls back to the original uncompressed 200 body when brotliCompressSync throws", async () => {
+    const payload = { ok: true, big: "x".repeat(50) };
+    const originalBytes = new Uint8Array(await jsonResponse(payload).arrayBuffer());
+
+    const zlib = await import("node:zlib");
+    const brotliSpy = spyOn(zlib, "brotliCompressSync").mockImplementation(() => {
+      throw new Error("brotli exploded");
+    });
+
+    try {
+      const out = await maybeCompress(reqWith("br"), jsonResponse(payload));
+
+      expect(out.status).toBe(200);
+      expect(out.headers.get("Content-Encoding")).toBeNull();
+      const bodyOut = new Uint8Array(await out.arrayBuffer());
+      expect(Buffer.from(bodyOut).equals(Buffer.from(originalBytes))).toBe(true);
+    } finally {
+      brotliSpy.mockRestore();
+    }
+  });
+
+  it("dispatch integration: a compression failure never surfaces as a 500 through handleRequest", async () => {
+    delete Bun.env.REQUIRE_API_KEY; // /health is ungated regardless, keep enforcement off
+
+    const gzipSpy = spyOn(Bun, "gzipSync").mockImplementation(() => {
+      throw new Error("gzip exploded");
+    });
+
+    try {
+      const res = await handleRequest(
+        new Request("http://localhost/health", { headers: { "Accept-Encoding": "gzip" } }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Encoding")).toBeNull();
+      const body = (await res.json()) as { status?: string };
+      expect(body.status).toBe("ok");
+    } finally {
+      gzipSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Dispatch integration — tail gate wired into handleRequest
 // ---------------------------------------------------------------------------
 
