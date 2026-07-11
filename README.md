@@ -83,6 +83,27 @@ Event model and SQLite schema: [`OBSERVABILITY.md`](./OBSERVABILITY.md).
 The SQLite store at `logs/telemetry.db` is also directly queryable. No
 abstraction to learn, no ORM to fight.
 
+### Persistence and the database location
+
+The store defaults to `logs/telemetry.db`, **relative to the process working
+directory**. `logs/` is gitignored, so a deploy that cleans or replaces the
+working tree (`git clean -fdx`, a fresh checkout) wipes it. Set
+`TELEMETRY_DB_PATH` to an absolute path **outside** the deploy tree to keep data
+across redeploys, e.g. under systemd:
+
+```ini
+# /etc/systemd/system/claude-plan-api.service
+StateDirectory=claude-plan-api                     # creates /var/lib/claude-plan-api
+Environment=TELEMETRY_DB_PATH=/var/lib/claude-plan-api/telemetry.db
+```
+
+The DB runs in WAL mode: committed rows sit in the `telemetry.db-wal` sidecar
+until a checkpoint folds them into the main file. The app checkpoints
+periodically and on graceful shutdown, so a normal restart is safe. Do **not**
+back up or copy `telemetry.db` alone while the service is stopped uncleanly —
+copy the `-wal`/`-shm` sidecars too, or checkpoint first
+(`sqlite3 telemetry.db 'PRAGMA wal_checkpoint(TRUNCATE);'`).
+
 ## Authentication
 
 Inbound requests to the JSON API — `/v1/*` (OpenAI-compat) and `/api/*`
