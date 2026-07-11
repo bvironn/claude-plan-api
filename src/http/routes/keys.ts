@@ -209,7 +209,13 @@ async function _handleKeysRotate(req: Request): Promise<Response> {
   // Deliberately NOT wrapped in try/catch: a UNIQUE collision on key_hash must
   // surface (REQ-4), not be swallowed. The atomic UPDATE's WHERE clause means
   // a thrown error leaves the original row untouched.
-  rotateApiKey(id, prefix, hashKey(full), rotated_at);
+  const rotated = rotateApiKey(id, prefix, hashKey(full), rotated_at);
+  // The active-only UPDATE matches no row when the key was revoked in the window
+  // since the preliminary classification (TOCTOU). Never report success with a
+  // plaintext that was never persisted — re-classify the race loss as revoked.
+  if (!rotated) {
+    return json({ error: { message: "Cannot rotate a revoked key" } }, 409);
+  }
 
   // EXPLICIT literal DTO — assembled field by field. Do NOT spread any row:
   // `full` is the plaintext, shown this one time only; everything else comes

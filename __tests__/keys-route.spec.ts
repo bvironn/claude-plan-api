@@ -513,6 +513,21 @@ describe("route — POST /api/keys/:id/rotate", () => {
     expect(list).not.toHaveBeenCalled();
   });
 
+  it("returns 409 without leaking a plaintext when the key is revoked in the race between classification and UPDATE (TOCTOU)", async () => {
+    Bun.env.API_KEY_PEPPER = "test-pepper";
+    // Preliminary classification sees the key as active...
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    // ...but the atomic active-only UPDATE matched no row (concurrently revoked) → false.
+    push(spyOn(storage, "rotateApiKey").mockReturnValue(false));
+
+    const res = await handleKeysRotate(rotateReq("3"));
+
+    // Must NOT report success with a credential that was never persisted.
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("full");
+  });
+
   it("propagates a key_hash UNIQUE collision instead of swallowing it — original row is left to storage's atomic rollback (sc7)", async () => {
     Bun.env.API_KEY_PEPPER = "test-pepper";
     push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
