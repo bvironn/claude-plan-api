@@ -432,6 +432,23 @@ export function revokeApiKey(id: number): boolean {
   return res.changes > 0;
 }
 
+/**
+ * Rename an ACTIVE key's human-facing `label`. Updates ONLY the `label` column
+ * and never touches `key_hash`, `prefix`, `is_admin`, `created_at`, or
+ * `revoked_at`. Scoped to `revoked_at IS NULL` so a revoked key — a terminal
+ * audit artifact — can never be renamed (mirrors revoke's active-only
+ * semantics). Returns `true` iff a row changed; `false` for a revoked or
+ * nonexistent id (the route maps `false` to 409/404 via a preliminary lookup).
+ */
+export function updateApiKeyLabel(id: number, label: string): boolean {
+  if (!db) return false;
+  const res = db.prepare<void, [string, number]>(
+    `UPDATE api_keys SET label = ?
+     WHERE id = ? AND revoked_at IS NULL`
+  ).run(label, id);
+  return res.changes > 0;
+}
+
 export interface UsageFilters {
   timeFrom?: string;
   timeTo?: string;

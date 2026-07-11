@@ -12,6 +12,7 @@ import {
   getUsageByApiKey,
   listApiKeys,
   revokeApiKey,
+  updateApiKeyLabel,
 } from "../src/observability/storage.ts";
 
 // Every test runs against a fresh in-memory DB → deterministic, isolated,
@@ -227,6 +228,50 @@ describe("storage — revokeApiKey (idempotent soft-revoke)", () => {
   it("returns false for an unknown id (no row transitions)", () => {
     insertApiKey({ prefix: "cpk_x", key_hash: "hash-x", label: "x", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
     expect(revokeApiKey(999)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateApiKeyLabel — active-only label update, returns boolean (task 1.1)
+// ---------------------------------------------------------------------------
+
+describe("storage — updateApiKeyLabel (active-only label update)", () => {
+  it("updates the label of an active key and returns true", () => {
+    insertApiKey({ prefix: "cpk_a", key_hash: "h-a", label: "old", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+
+    const changed = updateApiKeyLabel(1, "new");
+
+    expect(changed).toBe(true);
+    // The new label is persisted and visible via the metadata list.
+    expect(listApiKeys()[0]!.label).toBe("new");
+  });
+
+  it("touches ONLY the label — key_hash, prefix, is_admin, revoked_at are unchanged", () => {
+    insertApiKey({ prefix: "cpk_a", key_hash: "h-a", label: "old", created_at: "2026-01-01T00:00:00Z", is_admin: 1 });
+
+    updateApiKeyLabel(1, "renamed");
+
+    // key_hash still authenticates (active-only lookup finds it, digest intact).
+    const row = getApiKeyByHash("h-a");
+    expect(row).not.toBeNull();
+    expect(row!.prefix).toBe("cpk_a");
+    expect(row!.is_admin).toBe(1);
+    expect(row!.revoked_at ?? null).toBeNull();
+    expect(row!.label).toBe("renamed");
+  });
+
+  it("returns false for a revoked key and leaves its label unchanged", () => {
+    insertApiKey({ prefix: "cpk_r", key_hash: "h-r", label: "keep", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z", is_admin: 0 });
+
+    const changed = updateApiKeyLabel(1, "should-not-apply");
+
+    expect(changed).toBe(false);
+    expect(listApiKeys()[0]!.label).toBe("keep");
+  });
+
+  it("returns false for a nonexistent id (no row changes)", () => {
+    insertApiKey({ prefix: "cpk_a", key_hash: "h-a", label: "old", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    expect(updateApiKeyLabel(999, "new")).toBe(false);
   });
 });
 

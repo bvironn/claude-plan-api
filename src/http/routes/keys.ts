@@ -1,11 +1,12 @@
 import { getApiKeyPepper } from "../../config.ts";
 import { generateKey, hashKey } from "../../domain/api-keys.ts";
-import { listApiKeys, insertApiKey, revokeApiKey } from "../../observability/storage.ts";
+import { listApiKeys, insertApiKey, revokeApiKey, updateApiKeyLabel } from "../../observability/storage.ts";
 import { withObservability } from "../../observability/middleware.ts";
 
 /**
- * API-key administration routes (list / create / revoke) under the already-gated
- * `/api/` prefix — they inherit `enforceApiKey` for free (design decision #1).
+ * API-key administration routes (list / create / revoke / rename) under the
+ * already-gated `/api/` prefix — they inherit `enforceApiKey` for free (design
+ * decision #1).
  *
  * Unlike `/api/telemetry/*`, `/api/keys` is NOT a SILENT_PATH_PREFIX, so each
  * handler's `withObservability` wrapper writes a `requests` row attributed to
@@ -22,7 +23,7 @@ import { withObservability } from "../../observability/middleware.ts";
 const JSON_HEADERS = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
 } as const;
 
 function json(body: unknown, status = 200): Response {
@@ -100,6 +101,71 @@ async function _handleKeysRevoke(req: Request): Promise<Response> {
   return json({ revoked: revokeApiKey(id) });
 }
 
+/**
+ * PATCH /api/keys/:id `{ label }` → `200 ApiKeyMeta` (active-only, secret-safe).
+ *
+ * Updates ONLY the human-facing `label` of an ACTIVE key. Every other body
+ * field is ignored — `updateApiKeyLabel(id, label)` structurally cannot touch
+ * `key_hash`, `prefix`, `is_admin`, `created_at`, or `revoked_at`. The success
+ * response is an EXPLICIT literal `ApiKeyMeta` DTO assembled field by field; it
+ * MUST NEVER spread the DB row, which carries `key_hash`.
+ *
+ * State distinction (spec: revoked 409, unknown 404): a preliminary
+ * `listApiKeys()` lookup classifies the target before the update. A bare
+ * affected-rows check on `updateApiKeyLabel` alone cannot tell "revoked" from
+ * "nonexistent" (both yield `false`), so the lookup disambiguates:
+ *   - id not found            → 404
+ *   - id found but revoked    → 409
+ *   - id found and active     → update, then return updated metadata.
+ */
+async function _handleKeysRename(req: Request): Promise<Response> {
+  const { pathname } = new URL(req.url);
+  const match = /^\/api\/keys\/([^/]+)$/.exec(pathname);
+  const id = match ? Number(match[1]) : Number.NaN;
+  // A non-integer id can never match a row → 404 (mirrors revoke's NaN guard).
+  if (!Number.isInteger(id)) {
+    return json({ error: { message: "Not found" } }, 404);
+  }
+
+  let label: unknown;
+  try {
+    const body = (await req.json()) as { label?: unknown };
+    label = body?.label;
+  } catch {
+    return json({ error: { message: "Invalid JSON body" } }, 400);
+  }
+  // Validation mirrors create: non-empty string after trimming.
+  if (typeof label !== "string" || label.trim() === "") {
+    return json({ error: { message: "label is required" } }, 400);
+  }
+  const trimmed = label.trim();
+
+  // Classify the target BEFORE mutating so 404 (unknown) and 409 (revoked) are
+  // distinguishable — updateApiKeyLabel returns `false` for both.
+  const existing = listApiKeys().find((k) => k.id === id);
+  if (!existing) {
+    return json({ error: { message: "Not found" } }, 404);
+  }
+  if (existing.revoked_at != null) {
+    return json({ error: { message: "Cannot rename a revoked key" } }, 409);
+  }
+
+  updateApiKeyLabel(id, trimmed);
+
+  // EXPLICIT literal DTO — assembled field by field from the metadata row plus
+  // the new label. Do NOT spread any record: `ApiKeyMeta` is secret-free by
+  // construction, but building the literal keeps the no-leak guarantee local.
+  return json({
+    id: existing.id,
+    prefix: existing.prefix,
+    label: trimmed,
+    created_at: existing.created_at,
+    revoked_at: existing.revoked_at,
+    is_admin: existing.is_admin,
+  });
+}
+
 export const handleKeysList = withObservability(_handleKeysList);
 export const handleKeysCreate = withObservability(_handleKeysCreate);
 export const handleKeysRevoke = withObservability(_handleKeysRevoke);
+export const handleKeysRename = withObservability(_handleKeysRename);

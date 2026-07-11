@@ -60,6 +60,32 @@ async function postJson<T>(url: string, body?: unknown): Promise<T> {
   return (await res.json()) as T
 }
 
+/**
+ * PATCH counterpart to `postJson`. Serializes the JSON `body`, attaches the
+ * same Bearer auth headers, and applies the identical 401 → typed-error
+ * contract so rename shares the key-entry recovery flow. Used for partial
+ * updates (currently the label-only key rename).
+ */
+async function patchJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...authHeaders(),
+    },
+    body: JSON.stringify(body),
+  })
+  if (res.status === 401) {
+    throw new UnauthorizedError()
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`PATCH ${url} failed: ${res.status} ${text.slice(0, 200)}`)
+  }
+  return (await res.json()) as T
+}
+
 function toQuery(params: Record<string, unknown>): string {
   const entries: string[] = []
   for (const [key, val] of Object.entries(params)) {
@@ -186,6 +212,16 @@ export function createApiKey(label: string): Promise<CreatedApiKey> {
 
 export function revokeApiKey(id: number): Promise<{ revoked: boolean }> {
   return postJson<{ revoked: boolean }>(`/api/keys/${id}/revoke`)
+}
+
+/**
+ * Rename an existing key's human-facing `label`. PATCHes `/api/keys/:id` with a
+ * `{ label }` body and returns the updated metadata (never the secret). The
+ * backend restricts this to ACTIVE keys: a revoked key yields 409 and an
+ * unknown id yields 404, both surfaced as a thrown `Error` here.
+ */
+export function renameApiKey(id: number, label: string): Promise<ApiKeyMeta> {
+  return patchJson<ApiKeyMeta>(`/api/keys/${id}`, { label })
 }
 
 // ---------------------------------------------------------------------------

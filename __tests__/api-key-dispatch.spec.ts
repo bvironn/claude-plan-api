@@ -259,6 +259,23 @@ describe("dispatch — enforcement ON: /api/keys admin surface → 401 without a
     expect(res.status).toBe(401);
     expect(rev).not.toHaveBeenCalled();
   });
+
+  it("gates PATCH /api/keys/:id (rename) with no key → 401 and never updates", async () => {
+    enable();
+    stubKeyLookup(null);
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys/1", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: "new" }),
+      })
+    );
+
+    expect(res.status).toBe(401);
+    expect(upd).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -312,6 +329,33 @@ describe("dispatch — enforcement ON: /api/keys reaches its handlers with a val
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ revoked: true });
     expect(rev).toHaveBeenCalledWith(5);
+  });
+
+  it("PATCH /api/keys/:id with a valid ADMIN key → 200 renamed metadata (route wired, not 404)", async () => {
+    enable();
+    stubKeyLookup(ACTIVE_KEY); // ADMIN key (is_admin: 1) — required to pass the /api/* gate.
+    stubInsertRequest();
+    stubUpdateRequest();
+    push(
+      spyOn(storage, "listApiKeys").mockReturnValue([
+        { id: 5, prefix: "cpk_deadbeef", label: "old", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1 },
+      ])
+    );
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleRequest(
+      new Request("http://localhost/api/keys/5", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer cpk_deadbeef.good-secret" },
+        body: JSON.stringify({ label: "renamed" }),
+      })
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: number; label: string };
+    expect(body.id).toBe(5);
+    expect(body.label).toBe("renamed");
+    expect(upd).toHaveBeenCalledWith(5, "renamed");
   });
 });
 

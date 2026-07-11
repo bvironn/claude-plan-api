@@ -3,6 +3,7 @@ import {
   handleKeysList,
   handleKeysCreate,
   handleKeysRevoke,
+  handleKeysRename,
 } from "../src/http/routes/keys.ts";
 import * as storage from "../src/observability/storage.ts";
 import type { ApiKeyMeta, ApiKeyRecord } from "../src/observability/types.ts";
@@ -242,5 +243,181 @@ describe("route — POST /api/keys/:id/revoke", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ revoked: false });
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/keys/:id — rename label (active-only, secret-safe)
+// ---------------------------------------------------------------------------
+
+/** Build a PATCH Request for `/api/keys/:id` with a JSON body. */
+function renameReq(id: string, body: unknown): Request {
+  return new Request(`http://localhost/api/keys/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+const ACTIVE_KEY: ApiKeyMeta = {
+  id: 3,
+  prefix: "cpk_active",
+  label: "old",
+  created_at: "2026-05-01T00:00:00Z",
+  revoked_at: null,
+  is_admin: 0,
+};
+const REVOKED_KEY: ApiKeyMeta = {
+  id: 4,
+  prefix: "cpk_revoked",
+  label: "dead",
+  created_at: "2026-01-01T00:00:00Z",
+  revoked_at: "2026-02-01T00:00:00Z",
+  is_admin: 0,
+};
+
+describe("route — PATCH /api/keys/:id (rename)", () => {
+  it("renames an active key → 200 with an explicit ApiKeyMeta DTO carrying the new label", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("3", { label: "renamed" }));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    // Explicit literal DTO — exactly the ApiKeyMeta keys, nothing else.
+    expect(Object.keys(body).sort()).toEqual(["created_at", "id", "is_admin", "label", "prefix", "revoked_at"]);
+    expect(body.id).toBe(3);
+    expect(body.prefix).toBe("cpk_active");
+    expect(body.label).toBe("renamed"); // the NEW label, not "old"
+    expect(body.created_at).toBe("2026-05-01T00:00:00Z");
+    expect(body.revoked_at).toBeNull();
+    // Storage was asked to update exactly (id, trimmed label).
+    expect(upd).toHaveBeenCalledWith(3, "renamed");
+  });
+
+  it("trims the label before persisting and returns the trimmed value", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("3", { label: "  spaced  " }));
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.label).toBe("spaced");
+    expect(upd).toHaveBeenCalledWith(3, "spaced");
+  });
+
+  it("NEGATIVE: the success response JSON contains NO key_hash (never spreads the row)", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("3", { label: "safe" }));
+
+    const raw = await res.text();
+    expect(raw.includes("key_hash")).toBe(false);
+  });
+
+  it("ignores non-label body fields (is_admin, key_hash) — only label is forwarded to storage", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(
+      renameReq("3", { label: "ok", is_admin: true, key_hash: "x", revoked_at: "2020-01-01T00:00:00Z" })
+    );
+
+    expect(res.status).toBe(200);
+    // updateApiKeyLabel takes ONLY (id, label) — extra fields cannot reach storage.
+    expect(upd).toHaveBeenCalledWith(3, "ok");
+    const body = (await res.json()) as Record<string, unknown>;
+    // Response reflects the stored metadata, not the malicious body values.
+    expect(body.is_admin).toBe(0);
+    expect(body.revoked_at).toBeNull();
+  });
+
+  it("rejects a whitespace-only label with 400 and never touches storage", async () => {
+    const list = push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("3", { label: "   " }));
+
+    expect(res.status).toBe(400);
+    expect(upd).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty-string label with 400", async () => {
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+    const res = await handleKeysRename(renameReq("3", { label: "" }));
+    expect(res.status).toBe(400);
+    expect(upd).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing label with 400", async () => {
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+    const res = await handleKeysRename(renameReq("3", {}));
+    expect(res.status).toBe(400);
+    expect(upd).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-string label with 400", async () => {
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+    const res = await handleKeysRename(renameReq("3", { label: 42 }));
+    expect(res.status).toBe(400);
+    expect(upd).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid JSON body with 400", async () => {
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+    const res = await handleKeysRename(
+      new Request("http://localhost/api/keys/3", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: "{not json",
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(upd).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 for a revoked key and never calls updateApiKeyLabel", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([REVOKED_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("4", { label: "new" }));
+
+    expect(res.status).toBe(409);
+    expect(upd).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a nonexistent id and never calls updateApiKeyLabel", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("999", { label: "new" }));
+
+    expect(res.status).toBe(404);
+    expect(upd).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE: error responses (409) also carry NO key_hash", async () => {
+    push(spyOn(storage, "listApiKeys").mockReturnValue([REVOKED_KEY]));
+    push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(false));
+
+    const res = await handleKeysRename(renameReq("4", { label: "new" }));
+
+    const raw = await res.text();
+    expect(raw.includes("key_hash")).toBe(false);
+  });
+
+  it("returns 404 for a non-numeric id without touching storage", async () => {
+    const list = push(spyOn(storage, "listApiKeys").mockReturnValue([ACTIVE_KEY]));
+    const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
+
+    const res = await handleKeysRename(renameReq("not-a-number", { label: "new" }));
+
+    expect(res.status).toBe(404);
+    expect(upd).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
   });
 });
