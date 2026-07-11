@@ -13,6 +13,7 @@ import {
   listApiKeys,
   revokeApiKey,
   updateApiKeyLabel,
+  rotateApiKey,
 } from "../src/observability/storage.ts";
 
 // Every test runs against a fresh in-memory DB → deterministic, isolated,
@@ -176,7 +177,8 @@ describe("storage — listApiKeys (metadata only, DESC)", () => {
       // Explicit-column SELECT → the row object has exactly the DTO keys and no
       // secret. This is the structural guarantee against a `SELECT *` leak.
       // `is_admin` is an intentional part of the metadata allowlist (not a secret).
-      expect(Object.keys(row).sort()).toEqual(["created_at", "id", "is_admin", "label", "prefix", "revoked_at"]);
+      // `rotated_at` joined the allowlist with the rotate-api-key change.
+      expect(Object.keys(row).sort()).toEqual(["created_at", "id", "is_admin", "label", "prefix", "revoked_at", "rotated_at"]);
       expect("key_hash" in row).toBe(false);
     }
   });
@@ -302,6 +304,92 @@ describe("storage — api_keys.is_admin persistence", () => {
     const byLabel = new Map(listApiKeys().map((r) => [r.label, r]));
     expect(byLabel.get("root")!.is_admin).toBe(1);
     expect(byLabel.get("user")!.is_admin).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rotateApiKey — in-place secret swap, active-only, rotated_at stamp (REQ-1,
+// REQ-4, REQ-5, REQ-6)
+// ---------------------------------------------------------------------------
+
+describe("storage — rotateApiKey (in-place secret swap, active-only)", () => {
+  it("preserves id and requests.api_key_id attribution across rotation (sc2)", () => {
+    const id = insertApiKey({ prefix: "cpk_old", key_hash: "h-old", label: "ci", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    insertRequest({ trace_id: "t-rot-1", timestamp: "2026-04-01T00:00:00Z", api_key_id: id });
+
+    const changed = rotateApiKey(id, "cpk_new", "h-new", "2026-05-01T00:00:00Z");
+
+    expect(changed).toBe(true);
+    // Same id still resolves via the new hash — no new row was created.
+    const row = getApiKeyByHash("h-new");
+    expect(row).not.toBeNull();
+    expect(row!.id).toBe(id);
+    // Attribution on the prior request row is untouched — it still points at id.
+    const req = getRequestByTrace("t-rot-1") as unknown as Record<string, unknown>;
+    expect(req.api_key_id).toBe(id);
+  });
+
+  it("preserves is_admin: 1 across rotation — the SET clause never touches is_admin (sc3)", () => {
+    const id = insertApiKey({ prefix: "cpk_root", key_hash: "h-root", label: "root", created_at: "2026-01-01T00:00:00Z", is_admin: 1 });
+    rotateApiKey(id, "cpk_root2", "h-root2", "2026-05-01T00:00:00Z");
+    const row = getApiKeyByHash("h-root2");
+    expect(row!.is_admin).toBe(1);
+  });
+
+  it("preserves is_admin: 0 across rotation (sc4)", () => {
+    const id = insertApiKey({ prefix: "cpk_user", key_hash: "h-user", label: "user", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    rotateApiKey(id, "cpk_user2", "h-user2", "2026-05-01T00:00:00Z");
+    const row = getApiKeyByHash("h-user2");
+    expect(row!.is_admin).toBe(0);
+  });
+
+  it("stamps rotated_at with the given timestamp on success (sc8)", () => {
+    const id = insertApiKey({ prefix: "cpk_a", key_hash: "h-a", label: "a", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    rotateApiKey(id, "cpk_a2", "h-a2", "2026-06-01T00:00:00Z");
+    const row = getApiKeyByHash("h-a2") as unknown as Record<string, unknown>;
+    expect(row.rotated_at).toBe("2026-06-01T00:00:00Z");
+  });
+
+  it("leaves rotated_at NULL for a key that was never rotated (sc9)", () => {
+    insertApiKey({ prefix: "cpk_b", key_hash: "h-b", label: "b", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    const row = getApiKeyByHash("h-b") as unknown as Record<string, unknown>;
+    expect(row.rotated_at ?? null).toBeNull();
+  });
+
+  it("replaces the prefix while the id stays the same (sc10)", () => {
+    const id = insertApiKey({ prefix: "cpk_before", key_hash: "h-before", label: "c", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    rotateApiKey(id, "cpk_after", "h-after", "2026-06-01T00:00:00Z");
+    const rows = listApiKeys();
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.id).toBe(id);
+    expect(rows[0]!.prefix).toBe("cpk_after");
+  });
+
+  it("is active-only: rotating a revoked key changes nothing and returns false", () => {
+    const id = insertApiKey({ prefix: "cpk_dead", key_hash: "h-dead", label: "dead", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z", is_admin: 0 });
+    const changed = rotateApiKey(id, "cpk_dead2", "h-dead2", "2026-06-01T00:00:00Z");
+    expect(changed).toBe(false);
+    // Original hash still resolves (looked up ignoring active-only guard via listApiKeys metadata).
+    expect(listApiKeys()[0]!.prefix).toBe("cpk_dead");
+  });
+
+  it("returns false for an unknown id (no row transitions)", () => {
+    insertApiKey({ prefix: "cpk_x", key_hash: "h-x", label: "x", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    expect(rotateApiKey(999, "cpk_y", "h-y", "2026-06-01T00:00:00Z")).toBe(false);
+  });
+
+  it("surfaces a key_hash UNIQUE collision instead of swallowing it, leaving the original row unchanged (sc7)", () => {
+    const id = insertApiKey({ prefix: "cpk_target", key_hash: "h-target", label: "target", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    // A second key already owns the hash we are about to collide into.
+    insertApiKey({ prefix: "cpk_other", key_hash: "h-collide", label: "other", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+
+    expect(() => rotateApiKey(id, "cpk_target2", "h-collide", "2026-06-01T00:00:00Z")).toThrow();
+
+    // The original row's prefix/hash survived the failed UPDATE (atomic rollback).
+    const original = getApiKeyByHash("h-target");
+    expect(original).not.toBeNull();
+    expect(original!.id).toBe(id);
+    expect(original!.prefix).toBe("cpk_target");
   });
 });
 
