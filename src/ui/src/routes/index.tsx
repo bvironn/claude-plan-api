@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { useCallback, useMemo, useState } from "react"
 import { ListIcon, ZapIcon } from "lucide-react"
 
-import { listRequests } from "@/lib/api"
+import { listApiKeys, listRequests } from "@/lib/api"
 import type { RequestRecord } from "@/lib/types"
 import {
   formatDuration,
@@ -49,6 +49,7 @@ type IndexSearch = {
   q?: string
   status?: "2xx" | "4xx" | "5xx"
   model?: string
+  apiKeyId?: number
 }
 
 export const Route = createFileRoute("/")({
@@ -60,7 +61,9 @@ export const Route = createFileRoute("/")({
     const status =
       statusRaw === "2xx" || statusRaw === "4xx" || statusRaw === "5xx" ? statusRaw : undefined
     const model = typeof search.model === "string" && search.model.length > 0 ? search.model : undefined
-    return { q, status, model }
+    const apiKeyIdRaw = Number(search.apiKeyId)
+    const apiKeyId = Number.isInteger(apiKeyIdRaw) && apiKeyIdRaw >= 0 ? apiKeyIdRaw : undefined
+    return { q, status, model, apiKeyId }
   },
 })
 
@@ -85,6 +88,7 @@ function IndexPage() {
       path: "/v1/chat/completions",
       search: search.q,
       model: search.model,
+      apiKeyId: search.apiKeyId,
       status: statusArr,
       limit: 100,
       order: "desc" as const,
@@ -96,6 +100,13 @@ function IndexPage() {
     queryFn: () => listRequests(apiFilters),
     refetchInterval: 5_000, // gentle auto-refresh while the user sits on the list
   })
+
+  // API keys populate the filter selector (includes revoked keys for history).
+  const keysQuery = useQuery({
+    queryKey: ["api-keys"],
+    queryFn: () => listApiKeys(),
+  })
+  const apiKeys = keysQuery.data?.keys ?? []
 
   // Collect distinct models we've seen for the filter chips.
   const knownModels = useMemo(() => {
@@ -109,6 +120,7 @@ function IndexPage() {
     search: search.q,
     statusClass: search.status,
     model: search.model,
+    apiKeyId: search.apiKeyId,
   }
 
   function updateFilters(next: RequestsFilterState) {
@@ -117,6 +129,7 @@ function IndexPage() {
         q: next.search,
         status: next.statusClass,
         model: next.model,
+        apiKeyId: next.apiKeyId,
       }),
       replace: true,
     })
@@ -173,6 +186,7 @@ function IndexPage() {
         value={filterValue}
         onChange={updateFilters}
         models={knownModels}
+        apiKeys={apiKeys}
       />
 
       {query.isError && (
@@ -185,7 +199,7 @@ function IndexPage() {
       {query.isPending ? (
         <ListSkeleton />
       ) : query.data && query.data.requests.length === 0 ? (
-        <EmptyState filtered={Boolean(search.q || search.status || search.model)} />
+        <EmptyState filtered={Boolean(search.q || search.status || search.model || search.apiKeyId != null)} />
       ) : (
         <RequestsTable
           requests={requests}

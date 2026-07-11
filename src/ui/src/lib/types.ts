@@ -32,6 +32,7 @@ export interface RequestRecord {
   error: string | null
   ip?: string
   userAgent?: string
+  apiKeyId?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +172,7 @@ export interface RequestFilters {
   path?: string
   traceId?: string
   model?: string
+  apiKeyId?: number
   from?: string
   to?: string
   minDuration?: number
