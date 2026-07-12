@@ -1,0 +1,28 @@
+{
+  "target": "dashboard-performance-2/phase-2",
+  "pr": 33,
+  "branch": "feat/dashboard-performance-2-phase2",
+  "base": "master",
+  "head_sha_post_correction": "dd831e524de2eaba48bddfa34335ef70a45f5cea",
+  "risk_tier": "medium",
+  "risk_reason": "188 authored lines, non-hot-path, behavior/state dominant risk",
+  "lenses_run": ["reliability"],
+  "findings": [
+    { "id": "REL-001", "lens": "reliability", "location": "src/ui/src/lib/session-query.ts:43,49-59", "severity": "CRITICAL", "evidence_class": "inferential", "status": "fixed", "corroboration": "refuted-or-corroborated: corroborated", "fix_commit": "dd831e5" },
+    { "id": "REL-002", "lens": "reliability", "location": "__tests__/ui-session-detail-resolution.spec.ts:88-108", "severity": "WARNING", "evidence_class": "deterministic", "status": "info" },
+    { "id": "REL-003", "lens": "reliability", "location": "__tests__/ui-session-detail-resolution.spec.ts", "severity": "WARNING", "evidence_class": "inferential", "status": "info" },
+    { "id": "REL-004", "lens": "reliability", "location": "src/ui/src/lib/session-query.ts:34", "severity": "WARNING", "evidence_class": "inferential", "status": "info" },
+    { "id": "REL-005", "lens": "reliability", "location": "repo-wide: no CI", "severity": "SUGGESTION", "evidence_class": "deterministic", "status": "info" }
+  ],
+  "blocking_findings_total": 1,
+  "blocking_findings_corrected": 1,
+  "refuter_used": true,
+  "correction_work_units": [
+    { "id": "REL-001", "commit": "dd831e5", "regression_test": "__tests__/ui-session-detail-resolution.spec.ts (refetchInterval assertions)" }
+  ],
+  "scoped_fix_validator_verdict": "approve",
+  "tests_before": "616 pass / 0 fail",
+  "tests_after": "617 pass / 0 fail",
+  "tsc_baseline_errors": 48,
+  "tsc_post_correction_errors": 48
+}

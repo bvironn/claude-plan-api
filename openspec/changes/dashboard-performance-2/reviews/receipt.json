@@ -1,0 +1,30 @@
+{
+  "schema": "review-receipt-mirror/v1",
+  "authoritative": false,
+  "note": "Non-authoritative mirror per the Bounded Review Execution contract. This repo has the native 'gentle-ai review-start/review-validate' CAS store available, but this transaction was executed and recorded manually by the orchestrator (4 detached lens sub-agents + 1 correction transaction + 1 scoped fix-delta validator) rather than through the native CLI, because its exact --policy-file/--operation/--input schema was not available in this session. Treat this file as documentation, not a durable receipt gentle-ai review-validate can consume.",
+  "change": "dashboard-performance-2",
+  "phase": 1,
+  "target": {
+    "pr": 32,
+    "branch": "feat/dashboard-performance-2-phase1",
+    "base": "master",
+    "base_sha": "c7894a3900d9eb64f191183761043dc893c2900e",
+    "final_head_sha": "f5e30ea5f00adffc987e7071b62978efb5b42a51"
+  },
+  "risk_tier": "high",
+  "lenses_run": ["review-risk", "review-readability", "review-reliability", "review-resilience"],
+  "outcome": "approved",
+  "blocking_findings": 2,
+  "blocking_findings_resolved": 2,
+  "correction_transactions_used": 1,
+  "scoped_fix_delta_validator": "approve",
+  "final_test_evidence": "646 pass / 0 fail; tsc --noEmit 48 errors (unchanged pre-existing baseline)",
+  "reviewed_at": "2026-07-11",
+  "maintainer_size_exception": {
+    "granted": true,
+    "pr_lines": 1393,
+    "budget": 400,
+    "rationale": "user-approved exception; overage is TDD-mandated tests (~585 lines) + OpenSpec planning docs (~419 lines), source code ~340 lines",
+    "recorded_at": "https://github.com/bvironn/claude-plan-api/pull/32#issuecomment"
+  }
+}
