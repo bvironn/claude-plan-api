@@ -142,19 +142,23 @@ function initRequestsFts(): void {
         content='requests',
         content_rowid='id'
       );
-      CREATE TRIGGER IF NOT EXISTS requests_ai AFTER INSERT ON requests BEGIN
-        INSERT INTO requests_fts(rowid, request_body, response_body)
-        VALUES (new.id, new.request_body, new.response_body);
-      END;
+      -- INSERT/UPDATE indexing used to be synced via AFTER triggers that ran
+      -- in the SAME statement/transaction as the base write (requests_ai /
+      -- requests_au). That coupling meant a single bad FTS5 write (corrupt
+      -- index, disk full, an error inside the vtable) aborted the WHOLE
+      -- triggering statement, silently dropping the actual telemetry row
+      -- along with the index update (RESIL-002). insertRequest/updateRequest
+      -- now perform this sync as an explicit, separate, best-effort step
+      -- (see syncFtsRow) AFTER the base write has already committed, so an
+      -- index failure can never lose real data. Drop any triggers a
+      -- pre-existing (already-deployed) DB may still carry from before this
+      -- change — leaving them in place would double-index every write (once
+      -- via the stale trigger, once via the new app-level sync).
+      DROP TRIGGER IF EXISTS requests_ai;
+      DROP TRIGGER IF EXISTS requests_au;
       CREATE TRIGGER IF NOT EXISTS requests_ad AFTER DELETE ON requests BEGIN
         INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body)
         VALUES ('delete', old.id, old.request_body, old.response_body);
-      END;
-      CREATE TRIGGER IF NOT EXISTS requests_au AFTER UPDATE ON requests BEGIN
-        INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body)
-        VALUES ('delete', old.id, old.request_body, old.response_body);
-        INSERT INTO requests_fts(rowid, request_body, response_body)
-        VALUES (new.id, new.request_body, new.response_body);
       END;
     `);
 
@@ -306,10 +310,46 @@ export function insertEvent(e: TelemetryEvent): void {
   }
 }
 
+/**
+ * Synchronize one row's indexed content into `requests_fts`. Called AFTER the
+ * base `requests` write (insert or update) has already committed, in its own
+ * try/catch — a failure here is logged via emit() and swallowed, NEVER
+ * re-thrown, so an FTS5 write failure (corrupt index, an error inside the
+ * vtable, disk full) can never cause the actual telemetry row to be rolled
+ * back or lost. This replaces the old AFTER INSERT / AFTER UPDATE triggers,
+ * which ran in the SAME statement as the base write and could therefore abort
+ * it (RESIL-002).
+ *
+ * `previous` must be the content column values as they were indexed BEFORE
+ * this write (omit for a fresh INSERT) — FTS5's external-content 'delete'
+ * command needs the OLD values to correctly remove the old terms before the
+ * new ones are inserted, mirroring what the AFTER UPDATE trigger used to do.
+ */
+function syncFtsRow(
+  id: number,
+  next: { request_body: string | null; response_body: string | null },
+  previous?: { request_body: string | null; response_body: string | null }
+): void {
+  if (!ftsAvailable) return;
+  try {
+    if (previous) {
+      db.prepare(
+        "INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body) VALUES ('delete', ?, ?, ?)"
+      ).run(id, previous.request_body, previous.response_body);
+    }
+    db.prepare(
+      "INSERT INTO requests_fts(rowid, request_body, response_body) VALUES (?, ?, ?)"
+    ).run(id, next.request_body, next.response_body);
+  } catch (err) {
+    emit("warn", "storage.fts.syncFailed", { id, error: (err as Error).message });
+  }
+}
+
 export function insertRequest(r: RequestRecord): void {
   if (!db) return;
+  let insertedId: number | undefined;
   try {
-    getInsertRequest().run(
+    const result = getInsertRequest().run(
       r.trace_id,
       r.timestamp,
       r.method ?? null,
@@ -330,21 +370,83 @@ export function insertRequest(r: RequestRecord): void {
       r.error ?? null,
       r.api_key_id ?? null
     );
+    // `INSERT OR IGNORE` skips silently on a duplicate trace_id — `changes` is
+    // 0 in that case and `lastInsertRowid` still points at the PREVIOUS
+    // insert, so it must only be used when a row was actually written.
+    if (result.changes > 0) {
+      insertedId = Number(result.lastInsertRowid);
+    }
   } catch (err) {
     emit("error", "storage.insertRequest.failed", { traceId: r.trace_id, error: (err as Error).message });
+    return;
+  }
+
+  // FTS sync is a separate, best-effort step (see syncFtsRow) — a failure
+  // here must never hide the fact that the `requests` row above was already
+  // committed successfully (RESIL-002).
+  if (insertedId != null) {
+    syncFtsRow(insertedId, {
+      request_body: r.request_body ?? null,
+      response_body: r.response_body ?? null,
+    });
   }
 }
 
 export function updateRequest(traceId: string, patch: Partial<RequestRecord>): void {
   if (!db) return;
+  const touchesBody = "request_body" in patch || "response_body" in patch;
+  let ftsSync:
+    | {
+        id: number;
+        next: { request_body: string | null; response_body: string | null };
+        previous: { request_body: string | null; response_body: string | null };
+      }
+    | undefined;
+
   try {
     const fields = Object.keys(patch).filter((k) => k !== "trace_id");
     if (fields.length === 0) return;
+
+    // Only the FTS index columns (request_body/response_body) need a resync;
+    // read the pre-update values first so syncFtsRow can issue the matching
+    // delete+insert FTS5 requires (see its doc comment) — but only pay this
+    // extra query when the patch actually touches one of those columns.
+    let before: { id: number; request_body: string | null; response_body: string | null } | null =
+      null;
+    if (touchesBody) {
+      before =
+        db
+          .query<
+            { id: number; request_body: string | null; response_body: string | null },
+            [string]
+          >("SELECT id, request_body, response_body FROM requests WHERE trace_id = ?")
+          .get(traceId) ?? null;
+    }
+
     const set = fields.map((f) => `${f} = ?`).join(", ");
     const values = fields.map((f) => (patch as Record<string, unknown>)[f] ?? null);
     db.prepare(`UPDATE requests SET ${set} WHERE trace_id = ?`).run(...values as never[], traceId);
+
+    if (before) {
+      ftsSync = {
+        id: before.id,
+        previous: { request_body: before.request_body, response_body: before.response_body },
+        next: {
+          request_body: "request_body" in patch ? (patch.request_body ?? null) : before.request_body,
+          response_body:
+            "response_body" in patch ? (patch.response_body ?? null) : before.response_body,
+        },
+      };
+    }
   } catch (err) {
     emit("error", "storage.updateRequest.failed", { traceId, error: (err as Error).message });
+    return;
+  }
+
+  // See syncFtsRow: runs after the base UPDATE has committed, in its own
+  // failure domain (RESIL-002).
+  if (ftsSync) {
+    syncFtsRow(ftsSync.id, ftsSync.next, ftsSync.previous);
   }
 }
 
