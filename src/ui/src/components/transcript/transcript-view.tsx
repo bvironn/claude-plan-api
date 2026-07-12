@@ -3,12 +3,9 @@ import { Fragment, useMemo } from "react"
 import { MessageBubble } from "@/components/transcript/message-bubble"
 import { ReasoningBlock } from "@/components/transcript/reasoning-block"
 import { SystemBlocks } from "@/components/transcript/system-blocks"
-import type {
-  AnthropicRequestBody,
-  OpenAIChatRequestBody,
-  RequestRecord,
-} from "@/lib/types"
+import type { AnthropicRequestBody, RequestRecord } from "@/lib/types"
 import { parseOrNull } from "@/lib/format"
+import { resolveTranscriptMessages, type TurnDedup } from "@/lib/session-turns"
 import { parseResponseBody } from "@/lib/sse-parser"
 
 /**
@@ -26,11 +23,21 @@ import { parseResponseBody } from "@/lib/sse-parser"
  *   - Messages: upstreamRequestBody.messages (same reason — normalised shape
  *     with the client's forwarded prompt as a prefix on the first user msg).
  *   - Response: responseBody (OpenAI shape, since the client sees this).
+ *
+ * `dedup` (optional) — when the leading `sharedCount` messages of this turn
+ * already rendered in an earlier turn, they collapse into ONE static marker and
+ * only the new suffix renders. Omitted or `{kind:"full"}` → render every message
+ * (backward-compatible for `r.$traceId.tsx` and other single-turn callers).
  */
-export function TranscriptView({ record }: { record: RequestRecord }) {
+export function TranscriptView({
+  record,
+  dedup,
+}: {
+  record: RequestRecord
+  dedup?: TurnDedup
+}) {
   const { systemBlocks, messages, responseMessage, reasoningText, reasoningDetails } = useMemo(() => {
     const upstream = parseOrNull<AnthropicRequestBody>(record.upstreamRequestBody)
-    const clientReq = parseOrNull<OpenAIChatRequestBody>(record.requestBody)
     // parseResponseBody handles BOTH shapes: JSON (non-streaming) and raw
     // Anthropic SSE bytes (streaming). The gateway stores whatever came off
     // the upstream socket, so streaming requests have event/data framing.
@@ -42,13 +49,9 @@ export function TranscriptView({ record }: { record: RequestRecord }) {
       text?: string
     } & Record<string, unknown>>
 
-    // Messages — prefer upstream normalised shape, else fall back to client input
-    const messages =
-      upstream?.messages ??
-      (clientReq?.messages?.filter((m) => m.role !== "system") as
-        | AnthropicRequestBody["messages"]
-        | undefined) ??
-      []
+    // Messages — resolved via the SAME shared helper `computeMessageDedup` uses,
+    // so the diff and the render can never drift (design: shared resolver).
+    const messages = resolveTranscriptMessages(record)
 
     // Response
     const responseMessage = response?.choices?.[0]?.message
@@ -60,11 +63,26 @@ export function TranscriptView({ record }: { record: RequestRecord }) {
     return { systemBlocks, messages, responseMessage, reasoningText, reasoningDetails }
   }, [record])
 
+  // Render dedup: when this turn's leading `sharedCount` messages already
+  // appeared verbatim in the origin turn, collapse them into ONE static,
+  // non-interactive marker and render only the new suffix. Any other verdict
+  // (`full`/`undefined`) renders every message unchanged (backward-compatible).
+  const isDeduped = dedup?.kind === "deduped"
+  const sharedCount = isDeduped ? dedup.sharedCount : 0
+  const visibleMessages = isDeduped ? messages.slice(sharedCount) : messages
+
   return (
     <div className="flex flex-col gap-4">
       {systemBlocks.length > 0 && <SystemBlocks blocks={systemBlocks} />}
 
-      {messages.map((msg, i) => (
+      {isDeduped && (
+        <p className="text-muted-foreground text-xs italic">
+          {sharedCount} earlier message{sharedCount === 1 ? "" : "s"} already shown in Turn{" "}
+          {dedup.originTurnIndex + 1}
+        </p>
+      )}
+
+      {visibleMessages.map((msg, i) => (
         <Fragment key={i}>
           <MessageBubble role={msg.role as "user" | "assistant"} content={msg.content} />
         </Fragment>

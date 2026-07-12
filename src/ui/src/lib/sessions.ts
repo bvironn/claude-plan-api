@@ -99,10 +99,15 @@ function flattenContent(content: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// Stable-ish hash (djb2). Only used for grouping, collisions are tolerable.
+// Stable-ish hash (djb2). Originally used only for conversation grouping,
+// where collisions are tolerable. `session-turns.ts` also reuses it as a
+// content-equality fingerprint feeding `computeMessageDedup`'s mandatory
+// mismatch guard — a collision there is a display-layer risk (a false dedup
+// marker), not a data-integrity one; this tradeoff is accepted per the
+// session-turn-message-dedup design doc, not something this comment overclaims.
 // ---------------------------------------------------------------------------
 
-function hash(text: string): string {
+export function hash(text: string): string {
   let h = 5381
   for (let i = 0; i < text.length; i++) {
     h = ((h << 5) + h + text.charCodeAt(i)) | 0
