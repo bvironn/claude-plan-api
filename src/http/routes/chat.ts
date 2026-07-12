@@ -1,6 +1,6 @@
 import { ensureValidToken } from "../../domain/credentials.ts";
 import { ensureAccountUuid } from "../../domain/account.ts";
-import { openaiToAnthropic } from "../../transform/openai-to-anthropic.ts";
+import { openaiToAnthropic, CapabilityMismatchError } from "../../transform/openai-to-anthropic.ts";
 import { anthropicToOpenai } from "../../transform/anthropic-to-openai.ts";
 import { streamAnthropicToOpenai } from "../../transform/streaming.ts";
 import { callAnthropic } from "../../upstream/anthropic-client.ts";
@@ -65,7 +65,27 @@ export async function handleChat(req: Request): Promise<Response> {
   await ensureValidToken();
   await ensureAccountUuid();
 
-  const { body: anthropicBody, isStructuredOutput, toolMap } = openaiToAnthropic(body);
+  let anthropicBody: Record<string, unknown>;
+  let isStructuredOutput: boolean;
+  let toolMap: ReturnType<typeof openaiToAnthropic>["toolMap"];
+  try {
+    ({ body: anthropicBody, isStructuredOutput, toolMap } = openaiToAnthropic(body));
+  } catch (err) {
+    // A confirmed-negative vision request (live registry says the model has no
+    // image support) is mapped to a structured 400 proxy_error — mirroring the
+    // anti-loop guard shape above. All other errors propagate unchanged.
+    if (err instanceof CapabilityMismatchError) {
+      emit("error", "chat.capabilityMismatch", { model: err.model, reason: err.reason });
+      return Response.json({
+        error: {
+          message: `Model ${err.model} does not support image input.`,
+          type: "proxy_error",
+          code: 400,
+        },
+      }, { status: 400 });
+    }
+    throw err;
+  }
   const model = anthropicBody.model as string;
   const isStream = anthropicBody.stream as boolean;
 

@@ -8,7 +8,7 @@
 // what the user would actually be charged for when sending the same body
 // to /v1/chat/completions.
 
-import { openaiToAnthropic } from "../../transform/openai-to-anthropic.ts";
+import { openaiToAnthropic, CapabilityMismatchError } from "../../transform/openai-to-anthropic.ts";
 import { countTokens, CountTokensError } from "../../upstream/count-tokens-client.ts";
 import { emit } from "../../observability/logger.ts";
 
@@ -34,7 +34,24 @@ export async function handleTokensCount(req: Request): Promise<Response> {
 
   // Reuse the real transform so the count mirrors the exact messages +
   // system shape that /v1/chat/completions would produce.
-  const { body: fullBody } = openaiToAnthropic(openaiBody);
+  let fullBody: Record<string, unknown>;
+  try {
+    ({ body: fullBody } = openaiToAnthropic(openaiBody));
+  } catch (err) {
+    // Confirmed-negative vision request → 400 proxy_error, identical to chat.
+    // Token counting must reject rather than silently count an unsupported image.
+    if (err instanceof CapabilityMismatchError) {
+      emit("error", "tokens.count.capabilityMismatch", { model: err.model, reason: err.reason });
+      return Response.json({
+        error: {
+          message: `Model ${err.model} does not support image input.`,
+          type: "proxy_error",
+          code: 400,
+        },
+      }, { status: 400 });
+    }
+    throw err;
+  }
 
   // /v1/messages/count_tokens is far stricter than /v1/messages: it rejects
   // max_tokens, context_management, output_config, thinking, stream, metadata,
