@@ -5,6 +5,7 @@ import {
   queryEvents,
 } from "../../../observability/storage.ts";
 import { withObservability } from "../../../observability/middleware.ts";
+import { firstUserPreview } from "../../../observability/conversation-preview.ts";
 import type { RequestFilters, EventFilters } from "../../../observability/storage.ts";
 
 const CORS = {
@@ -13,10 +14,21 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
-function toCamel(r: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Map a DB row to the camelCase API shape. Two projections (design decision #2):
+ *   - slim (default `full=false`): omits requestBody/responseBody/
+ *     upstreamRequestBody — the bytes-heavy fields — to cut list payload size.
+ *   - full (`full=true`, via `?bodies=full` and always for the by-id transcript):
+ *     the historical byte-superset.
+ *
+ * BOTH shapes carry the server-derived `firstUserPreview`: the first user
+ * message text (preferring the upstream/Anthropic body, falling back to the
+ * client/OpenAI body), so the dashboard can group sessions on the slim shape.
+ */
+function toCamel(r: Record<string, unknown>, full: boolean = true): Record<string, unknown> {
   const inT = (r.input_tokens as number | null) ?? 0;
   const outT = (r.output_tokens as number | null) ?? 0;
-  return {
+  const base: Record<string, unknown> = {
     id: r.id,
     traceId: r.trace_id,
     timestamp: r.timestamp,
@@ -31,13 +43,22 @@ function toCamel(r: Record<string, unknown>): Record<string, unknown> {
     totalTokens: inT + outT > 0 ? inT + outT : undefined,
     cacheReadTokens: r.cache_read_tokens ?? undefined,
     cacheCreationTokens: r.cache_creation_tokens ?? undefined,
-    requestBody: r.request_body,
-    responseBody: r.response_body,
-    upstreamRequestBody: r.upstream_request_body ?? null,
+    firstUserPreview:
+      firstUserPreview(r.upstream_request_body as string | null) ??
+      firstUserPreview(r.request_body as string | null),
     error: r.error,
     ip: r.ip,
     userAgent: r.user_agent,
     apiKeyId: r.api_key_id ?? undefined,
+  };
+
+  if (!full) return base;
+
+  return {
+    ...base,
+    requestBody: r.request_body,
+    responseBody: r.response_body,
+    upstreamRequestBody: r.upstream_request_body ?? null,
   };
 }
 
@@ -79,9 +100,13 @@ async function _handleTelemetryRequests(req: Request): Promise<Response> {
     order: p.get("order") === "asc" ? "asc" : "desc",
   };
 
+  // Slim by default; `?bodies=full` opts back into the raw request/response/
+  // upstream bodies (design decision #2). Only the exact value "full" opts in.
+  const full = p.get("bodies") === "full";
+
   const total = countRequests(filters);
   const rows = queryRequests(filters);
-  const requests = rows.map((r) => toCamel(r as unknown as Record<string, unknown>));
+  const requests = rows.map((r) => toCamel(r as unknown as Record<string, unknown>, full));
 
   return new Response(
     JSON.stringify({ total, limit: filters.limit, offset: filters.offset, requests }),

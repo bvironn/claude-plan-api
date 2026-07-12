@@ -45,6 +45,13 @@ export interface Conversation {
 // ---------------------------------------------------------------------------
 
 function firstUserTextFromRequest(record: RequestRecord): string | null {
+  // Prefer the server-derived preview: the slim list projection omits the raw
+  // bodies and ships `firstUserPreview` instead (dashboard-performance-2). It is
+  // already post-preamble and capped at the grouping key length, so grouping on
+  // it is identical to parsing the full bodies. Fall back to body parsing for the
+  // full shape / by-id transcript, or older cached responses without a preview.
+  if (typeof record.firstUserPreview === "string") return record.firstUserPreview;
+
   // Prefer upstream (post-transform) because it's what actually went to Anthropic.
   const upstream = parseOrNull<AnthropicRequestBody>(record.upstreamRequestBody)
   if (upstream?.messages) {

@@ -195,7 +195,9 @@ describe("telemetry/requests — toCamel mapping", () => {
 
     // handleTelemetryRequests uses the module-level `db` from storage.ts,
     // which was reset by initStorage() in beforeEach — same DB, same tests.
-    const req = new Request("http://localhost/api/telemetry/requests?limit=10");
+    // The list is slim by default now (dashboard-performance-2), so opt into the
+    // full bodies with `?bodies=full` to assert the upstream-body camel mapping.
+    const req = new Request("http://localhost/api/telemetry/requests?limit=10&bodies=full");
     const res = await handleTelemetryRequests(req);
     expect(res.status).toBe(200);
 

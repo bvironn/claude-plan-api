@@ -19,6 +19,7 @@ import { serveStatic, serveSpaFallback } from "./static.ts";
 import { withObservability } from "../observability/middleware.ts";
 import { emit } from "../observability/logger.ts";
 import { enforceApiKey } from "../guards/api-key.ts";
+import { maybeCompress } from "./compression.ts";
 
 // Paths whose exact match or prefix is owned by API handlers. GET requests to
 // any other path fall through to the SPA (dist/index.html) so client-side
@@ -65,51 +66,16 @@ export async function handleRequest(req: Request): Promise<Response> {
     // request. Returns a 401 `Response` (reject) or `null` (pass / not gated /
     // enforcement disabled). Gated surface: `/v1/*` and `/api/*` (incl.
     // telemetry); `/health`, `/`, `/assets/*`, and the SPA fallback bypass.
+    // The rejection is returned DIRECTLY (never through `maybeCompress`) so
+    // compression can never run on — or bypass — an unauthenticated request.
     const denied = enforceApiKey(req);
     if (denied) return denied;
 
-    if (method === "GET" && pathname === "/health") return await observedHealth(req);
-    if (method === "GET" && pathname === "/v1/models") return await observedModels(req);
-    if (method === "POST" && pathname === "/v1/chat/completions") return await observedChat(req);
-    if (method === "POST" && pathname === "/v1/completions") return await observedCompletions(req);
-    if (method === "POST" && pathname === "/v1/tokens/count") return await observedTokensCount(req);
-    if (method === "GET" && pathname === "/api/account/profile") return await observedAccountProfile(req);
-
-    // Telemetry API (audit-only, GET-dominant — no client-side ingest)
-    if (method === "GET" && pathname === "/api/telemetry/logs") return await handleTelemetryLogs(req);
-    if (method === "GET" && pathname === "/api/telemetry/stream") return await handleTelemetryStream(req);
-    if (method === "GET" && pathname === "/api/telemetry/metrics") return await handleTelemetryMetrics(req);
-    if (method === "GET" && pathname === "/api/telemetry/usage") return await handleTelemetryUsage(req);
-    if (method === "GET" && pathname === "/api/telemetry/requests") return await handleTelemetryRequests(req);
-    if (method === "GET" && pathname.startsWith("/api/telemetry/requests/")) return await handleTelemetryRequestById(req);
-    if (method === "GET" && pathname === "/api/telemetry/export") return await handleTelemetryExport(req);
-
-    // API key administration (list/create/revoke). Under the gated `/api/`
-    // prefix (inherits enforceApiKey) but NOT the telemetry SILENT prefix, so
-    // create/revoke write an attributed `requests` row.
-    if (method === "GET" && pathname === "/api/keys") return await handleKeysList(req);
-    if (method === "POST" && pathname === "/api/keys") return await handleKeysCreate(req);
-    if (method === "POST" && /^\/api\/keys\/[^/]+\/revoke$/.test(pathname)) return await handleKeysRevoke(req);
-    if (method === "PATCH" && /^\/api\/keys\/[^/]+$/.test(pathname)) return await handleKeysRename(req);
-    if (method === "POST" && /^\/api\/keys\/[^/]+\/rotate$/.test(pathname)) return await handleKeysRotate(req);
-
-    // Static asset serving for the built UI. Only kicks in on GET; POST
-    // and other verbs fall through to the 404 below.
-    if (method === "GET") {
-      // Try to serve a real static file first (index.html on /, real asset on /assets/*).
-      const staticRes = await serveStatic(pathname);
-      if (staticRes !== null) return staticRes;
-
-      // SPA fallback: any GET that isn't claimed by the API prefixes
-      // returns dist/index.html so TanStack Router can handle /r/:id,
-      // /live, /metrics, /compare, etc. on the client.
-      if (!isApiOwned(pathname)) {
-        return await serveSpaFallback();
-      }
-    }
-
-    emit("warn", "http.route.notFound", { method, path: pathname });
-    return Response.json({ error: { message: `Not found: ${method} ${pathname}` } }, { status: 404 });
+    // Single response tail gate (design decision #1): every dispatched
+    // response — JSON API + static assets — flows through `maybeCompress`,
+    // which negotiates br/gzip and excludes SSE / streamed exports declaratively.
+    const res = await dispatch(req, method, pathname);
+    return await maybeCompress(req, res);
   } catch (err) {
     emit("error", "http.unhandled", {
       method,
@@ -119,6 +85,58 @@ export async function handleRequest(req: Request): Promise<Response> {
     });
     return Response.json({ error: { message: (err as Error).message } }, { status: 500 });
   }
+}
+
+/**
+ * Route matching + handler invocation, extracted from `handleRequest` so the
+ * single tail response can flow through `maybeCompress` (design decision #1).
+ * Runs AFTER `enforceApiKey`; returns the raw (uncompressed) `Response` for the
+ * matched route, or the 404 fallback. Note: `OPTIONS` and the auth rejection are
+ * handled by `handleRequest` and never reach here.
+ */
+async function dispatch(req: Request, method: string, pathname: string): Promise<Response> {
+  if (method === "GET" && pathname === "/health") return await observedHealth(req);
+  if (method === "GET" && pathname === "/v1/models") return await observedModels(req);
+  if (method === "POST" && pathname === "/v1/chat/completions") return await observedChat(req);
+  if (method === "POST" && pathname === "/v1/completions") return await observedCompletions(req);
+  if (method === "POST" && pathname === "/v1/tokens/count") return await observedTokensCount(req);
+  if (method === "GET" && pathname === "/api/account/profile") return await observedAccountProfile(req);
+
+  // Telemetry API (audit-only, GET-dominant — no client-side ingest)
+  if (method === "GET" && pathname === "/api/telemetry/logs") return await handleTelemetryLogs(req);
+  if (method === "GET" && pathname === "/api/telemetry/stream") return await handleTelemetryStream(req);
+  if (method === "GET" && pathname === "/api/telemetry/metrics") return await handleTelemetryMetrics(req);
+  if (method === "GET" && pathname === "/api/telemetry/usage") return await handleTelemetryUsage(req);
+  if (method === "GET" && pathname === "/api/telemetry/requests") return await handleTelemetryRequests(req);
+  if (method === "GET" && pathname.startsWith("/api/telemetry/requests/")) return await handleTelemetryRequestById(req);
+  if (method === "GET" && pathname === "/api/telemetry/export") return await handleTelemetryExport(req);
+
+  // API key administration (list/create/revoke). Under the gated `/api/`
+  // prefix (inherits enforceApiKey) but NOT the telemetry SILENT prefix, so
+  // create/revoke write an attributed `requests` row.
+  if (method === "GET" && pathname === "/api/keys") return await handleKeysList(req);
+  if (method === "POST" && pathname === "/api/keys") return await handleKeysCreate(req);
+  if (method === "POST" && /^\/api\/keys\/[^/]+\/revoke$/.test(pathname)) return await handleKeysRevoke(req);
+  if (method === "PATCH" && /^\/api\/keys\/[^/]+$/.test(pathname)) return await handleKeysRename(req);
+  if (method === "POST" && /^\/api\/keys\/[^/]+\/rotate$/.test(pathname)) return await handleKeysRotate(req);
+
+  // Static asset serving for the built UI. Only kicks in on GET; POST
+  // and other verbs fall through to the 404 below.
+  if (method === "GET") {
+    // Try to serve a real static file first (index.html on /, real asset on /assets/*).
+    const staticRes = await serveStatic(pathname);
+    if (staticRes !== null) return staticRes;
+
+    // SPA fallback: any GET that isn't claimed by the API prefixes
+    // returns dist/index.html so TanStack Router can handle /r/:id,
+    // /live, /metrics, /compare, etc. on the client.
+    if (!isApiOwned(pathname)) {
+      return await serveSpaFallback();
+    }
+  }
+
+  emit("warn", "http.route.notFound", { method, path: pathname });
+  return Response.json({ error: { message: `Not found: ${method} ${pathname}` } }, { status: 404 });
 }
 
 export function startServer() {

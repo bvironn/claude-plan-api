@@ -3,6 +3,7 @@ import { insertRequest, updateRequest } from "./storage.ts";
 import { newTraceId, runWithTrace } from "./tracer.ts";
 import { SESSION_ID } from "../session.ts";
 import { getRequestKeyId } from "../domain/api-keys.ts";
+import { maybeCompress } from "../http/compression.ts";
 import type { TraceContext } from "./types.ts";
 
 const SILENT_PATH_PREFIXES = ["/api/telemetry"];
@@ -64,7 +65,16 @@ export function withObservability(
       });
 
       try {
-        const res = await handler(req);
+        const handled = await handler(req);
+        // Compression (design decision #1, `http-compression`) runs INSIDE
+        // this timed boundary, not after it: it's CPU-bound work on the hot
+        // path that the response-latency metrics must account for. `handleRequest`
+        // still runs its own tail `maybeCompress` call for routes that never
+        // reach `withObservability` (telemetry/static/keys); calling it again
+        // here is idempotent for those it does — `isNegotiable` short-circuits
+        // once `Content-Encoding` is already set, so this never double-buffers
+        // or double-compresses the body.
+        const res = await maybeCompress(req, handled);
         const duration = performance.now() - started;
 
         emit("info", "http.request.end", {
