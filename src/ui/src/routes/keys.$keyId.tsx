@@ -4,14 +4,18 @@ import { useMemo } from "react"
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
+  ClockIcon,
   KeyRoundIcon,
   ListIcon,
+  MessageSquareIcon,
   MessagesSquareIcon,
 } from "lucide-react"
 
 import { listApiKeys, listRequests } from "@/lib/api"
 import { deriveKeyMetrics, findApiKeyById } from "@/lib/keys-metrics"
-import { formatRelativeTime, formatTokens } from "@/lib/format"
+import type { RequestRecord } from "@/lib/types"
+import { formatDuration, formatRelativeTime, formatTokens } from "@/lib/format"
+import { StatusBadge } from "@/components/layout/status-badge"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -135,6 +139,9 @@ function KeyDetailPage() {
           ) : (
             <>
               <MetricsCards metrics={metrics} />
+              {requestsQuery.data?.requests[0] && (
+                <LastUsedCard record={requestsQuery.data.requests[0]} />
+              )}
               <PerModelTable metrics={metrics} />
             </>
           )}
@@ -286,6 +293,135 @@ function PerModelTable({
           </TableBody>
         </Table>
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Last used — rich detail of the single most recent attributed request
+// ---------------------------------------------------------------------------
+// Rendered ONLY inside the `metrics.requestCount > 0` branch, sourced from the
+// already-fetched `requestsQuery.data.requests[0]` (ordered desc by timestamp).
+// It issues NO new fetch. Zero-usage keys never reach here — they hit the
+// existing `ZeroUsage` empty state instead. Every nullable field degrades to
+// "—" via the shared formatters, so an incomplete record never renders
+// `undefined` or crashes.
+
+function LastUsedCard({ record }: { record: RequestRecord }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-sm">
+          <ClockIcon className="size-4" />
+          Last used
+        </CardTitle>
+        <CardDescription className="flex flex-wrap items-center gap-2">
+          <span>{formatRelativeTime(record.timestamp)}</span>
+          <span className="font-mono text-xs">
+            {new Date(record.timestamp).toLocaleString()}
+          </span>
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 text-sm">
+        <DetailRow label="Request">
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge status={record.status} />
+            <span className="font-mono text-xs break-all">
+              {record.method ?? "—"} {record.path ?? "—"}
+            </span>
+          </div>
+        </DetailRow>
+
+        <DetailRow label="Model">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs">{record.model ?? "—"}</span>
+            {record.isStream ? (
+              <Badge variant="secondary" className="font-normal">
+                streaming
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="font-normal">
+                blocking
+              </Badge>
+            )}
+          </div>
+        </DetailRow>
+
+        <DetailRow label="Duration">
+          <span className="font-mono text-xs">
+            {formatDuration(record.duration)}
+          </span>
+        </DetailRow>
+
+        <DetailRow label="Tokens">
+          <LastUsedTokens record={record} />
+        </DetailRow>
+
+        {(record.ip || record.userAgent) && (
+          <DetailRow label="Client">
+            <div className="flex min-w-0 flex-col gap-0.5 font-mono text-xs">
+              {record.ip && <span>{record.ip}</span>}
+              {record.userAgent && (
+                <span className="text-muted-foreground break-all">
+                  {record.userAgent}
+                </span>
+              )}
+            </div>
+          </DetailRow>
+        )}
+
+        <div className="pt-1">
+          <Button asChild variant="outline" size="sm">
+            <Link to="/r/$traceId" params={{ traceId: record.traceId }}>
+              <MessageSquareIcon data-icon="inline-start" />
+              View transcript
+            </Link>
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function DetailRow({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="text-muted-foreground w-20 shrink-0 text-xs">
+        {label}
+      </span>
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+function LastUsedTokens({ record }: { record: RequestRecord }) {
+  return (
+    <div className="flex flex-col gap-0.5 font-mono text-xs">
+      <TokenLine label="input ↓" value={record.inputTokens} />
+      <TokenLine label="output ↑" value={record.outputTokens} />
+      <TokenLine label="cache read" value={record.cacheReadTokens} />
+      <TokenLine label="cache write" value={record.cacheCreationTokens} />
+    </div>
+  )
+}
+
+function TokenLine({
+  label,
+  value,
+}: {
+  label: string
+  value: number | null | undefined
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-muted-foreground">{label}</span>
+      <span>{formatTokens(value)}</span>
     </div>
   )
 }

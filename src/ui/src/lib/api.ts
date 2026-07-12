@@ -192,6 +192,13 @@ export interface ApiKeyMeta {
   is_admin: number
   /** UTC ISO timestamp of the most recent rotation; `null`/absent means never rotated. */
   rotated_at?: string | null
+  /**
+   * UTC ISO timestamp of the key's most recent attributed request, computed
+   * UNWINDOWED on the backend (correlated `MAX(timestamp)` over `requests`,
+   * independent of the 30-day usage window). `null` means the key was never
+   * used. Mirrors the backend `ApiKeyMeta` field exactly.
+   */
+  last_used_at: string | null
 }
 
 export interface ApiKeyListResponse {

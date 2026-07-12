@@ -129,6 +129,7 @@ function key(overrides: Partial<ApiKeyMeta> & { id: number }): ApiKeyMeta {
     created_at: "2026-01-01T00:00:00.000Z",
     revoked_at: null,
     is_admin: 0,
+    last_used_at: null,
     ...overrides,
   }
 }

@@ -56,6 +56,7 @@ function withKey(prefix: string, label = "target"): ApiKeyMeta {
     created_at: "2026-01-01T00:00:00Z",
     revoked_at: null,
     is_admin: 0,
+    last_used_at: null,
   }
 }
 

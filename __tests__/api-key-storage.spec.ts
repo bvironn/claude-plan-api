@@ -178,7 +178,8 @@ describe("storage — listApiKeys (metadata only, DESC)", () => {
       // secret. This is the structural guarantee against a `SELECT *` leak.
       // `is_admin` is an intentional part of the metadata allowlist (not a secret).
       // `rotated_at` joined the allowlist with the rotate-api-key change.
-      expect(Object.keys(row).sort()).toEqual(["created_at", "id", "is_admin", "label", "prefix", "revoked_at", "rotated_at"]);
+      // `last_used_at` joined with the add-key-last-usage change (unwindowed MAX(timestamp)).
+      expect(Object.keys(row).sort()).toEqual(["created_at", "id", "is_admin", "label", "last_used_at", "prefix", "revoked_at", "rotated_at"]);
       expect("key_hash" in row).toBe(false);
     }
   });
@@ -201,6 +202,71 @@ describe("storage — listApiKeys (metadata only, DESC)", () => {
 
   it("returns an empty array when no keys exist", () => {
     expect(listApiKeys()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listApiKeys — unwindowed last_used_at (correlated MAX(timestamp) over
+// requests, index-backed by idx_requests_api_key) (add-key-last-usage)
+// ---------------------------------------------------------------------------
+
+describe("storage — listApiKeys last_used_at (unwindowed MAX(timestamp))", () => {
+  it("returns the ISO timestamp of the key's most recent attributed request", () => {
+    const id = insertApiKey({ prefix: "cpk_u", key_hash: "h-u", label: "u", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    // Insert out of chronological order — MAX must pick the true newest, not last-inserted.
+    insertRequest({ trace_id: "u1", timestamp: "2026-05-01T00:00:00Z", api_key_id: id });
+    insertRequest({ trace_id: "u2", timestamp: "2026-05-10T12:00:00Z", api_key_id: id });
+    insertRequest({ trace_id: "u3", timestamp: "2026-04-15T00:00:00Z", api_key_id: id });
+
+    const row = listApiKeys()[0]!;
+    expect(row.last_used_at).toBe("2026-05-10T12:00:00Z");
+  });
+
+  it("returns the REAL timestamp for a key idle beyond the 30-day usage window (regression guard, NOT null)", () => {
+    const id = insertApiKey({ prefix: "cpk_idle", key_hash: "h-idle", label: "idle", created_at: "2020-01-01T00:00:00Z", is_admin: 0 });
+    // The only attributed request is in the deep past — far outside any 30-day
+    // window relative to "now". An unwindowed MAX(timestamp) MUST still surface
+    // it; the getUsageByApiKey() 30-day window must NOT suppress it to null.
+    insertRequest({ trace_id: "old-1", timestamp: "2020-06-01T00:00:00Z", api_key_id: id });
+
+    const row = listApiKeys()[0]!;
+    expect(row.last_used_at).toBe("2020-06-01T00:00:00Z");
+  });
+
+  it("is null for a key with zero attributed requests", () => {
+    insertApiKey({ prefix: "cpk_zero", key_hash: "h-zero", label: "zero", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    const row = listApiKeys()[0]!;
+    expect(row.last_used_at).toBeNull();
+  });
+
+  it("retains a revoked key's pre-revocation last_used_at (revocation does not clear it)", () => {
+    const id = insertApiKey({ prefix: "cpk_rev", key_hash: "h-rev", label: "rev", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-03-01T00:00:00Z", is_admin: 0 });
+    insertRequest({ trace_id: "rev-1", timestamp: "2026-02-20T09:30:00Z", api_key_id: id });
+
+    const row = listApiKeys()[0]!;
+    expect(row.revoked_at).toBe("2026-03-01T00:00:00Z");
+    expect(row.last_used_at).toBe("2026-02-20T09:30:00Z");
+  });
+
+  it("computes last_used_at per key without cross-contamination (correct correlation)", () => {
+    const a = insertApiKey({ prefix: "cpk_a", key_hash: "h-a", label: "a", created_at: "2026-01-01T00:00:00Z", is_admin: 0 });
+    const b = insertApiKey({ prefix: "cpk_b", key_hash: "h-b", label: "b", created_at: "2026-01-02T00:00:00Z", is_admin: 0 });
+    insertApiKey({ prefix: "cpk_c", key_hash: "h-c", label: "c", created_at: "2026-01-03T00:00:00Z", is_admin: 0 });
+
+    // Key a: two requests → newest is 2026-06-02.
+    insertRequest({ trace_id: "a1", timestamp: "2026-06-01T00:00:00Z", api_key_id: a });
+    insertRequest({ trace_id: "a2", timestamp: "2026-06-02T00:00:00Z", api_key_id: a });
+    // Key b: one request, later than a's newest.
+    insertRequest({ trace_id: "b1", timestamp: "2026-07-15T00:00:00Z", api_key_id: b });
+    // Key c: no attributed requests.
+    // An unattributed request (api_key_id NULL) with a far-future timestamp must
+    // NOT leak into ANY key's last_used_at.
+    insertRequest({ trace_id: "x1", timestamp: "2030-01-01T00:00:00Z" });
+
+    const byLabel = new Map(listApiKeys().map((r) => [r.label, r]));
+    expect(byLabel.get("a")!.last_used_at).toBe("2026-06-02T00:00:00Z");
+    expect(byLabel.get("b")!.last_used_at).toBe("2026-07-15T00:00:00Z");
+    expect(byLabel.get("c")!.last_used_at).toBeNull();
   });
 });
 
