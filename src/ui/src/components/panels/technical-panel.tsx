@@ -1,3 +1,4 @@
+import { useMemo } from "react"
 import {
   ClockIcon,
   CoinsIcon,
@@ -175,6 +176,10 @@ function TokenBreakdown({ record }: { record: RequestRecord }) {
 }
 
 function JsonBlock({ content }: { content: string | null }) {
+  // Memoize the parse+stringify so it only reruns when the body changes, not on
+  // every re-render (tab switches, parent state). Hook runs unconditionally
+  // before the early return to obey the rules of hooks; prettyJson(null) === "".
+  const pretty = useMemo(() => prettyJson(content), [content])
   if (!content) {
     return (
       <div className="text-muted-foreground rounded-md border border-dashed p-3 text-center text-xs">
@@ -182,7 +187,6 @@ function JsonBlock({ content }: { content: string | null }) {
       </div>
     )
   }
-  const pretty = prettyJson(content)
   return (
     <div className="relative">
       <div className="absolute top-2 right-2 z-10">
