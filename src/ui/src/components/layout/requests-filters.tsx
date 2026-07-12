@@ -42,7 +42,8 @@ export function RequestsFilters({ value, onChange, models, apiKeys }: RequestsFi
         />
         <Input
           type="search"
-          placeholder="Search in request / response bodies …"
+          placeholder="Full-text search request / response bodies …"
+          title="Full-text search matches whole words and word-prefixes in the request / response bodies (not arbitrary substrings)."
           value={value.search ?? ""}
           onChange={(e) => onChange({ ...value, search: e.target.value || undefined })}
           className="pl-9"

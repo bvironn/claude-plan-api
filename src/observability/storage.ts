@@ -13,6 +13,10 @@ import { emit } from "./logger.ts";
 
 let db: Database;
 
+// Whether the external-content FTS5 index for request/response bodies is live.
+// Set by initStorage(); when false the search filter falls back to a LIKE scan.
+let ftsAvailable = false;
+
 /**
  * Open (or create) the telemetry SQLite database and ensure the schema.
  *
@@ -109,6 +113,79 @@ export function initStorage(dbPath: string = getTelemetryDbPath()): void {
   ensureColumn("api_keys", "rotated_at", "TEXT");
   // Index must be created AFTER ensureColumn so pre-existing DBs have the column.
   db.exec("CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id)");
+
+  initRequestsFts();
+}
+
+/**
+ * Stand up the full-text search index for `requests(request_body, response_body)`
+ * (finding #6). The `search` filter used to run an unindexed `LIKE '%term%'`
+ * scan over those large TEXT columns; this backs it with an FTS5 index instead.
+ *
+ * The index is an EXTERNAL-CONTENT FTS5 table (`content='requests'`): the base
+ * `requests` table stays the single source of truth and the FTS table only holds
+ * the inverted index. AFTER INSERT/UPDATE/DELETE triggers keep it in sync, and a
+ * one-time `rebuild` backfills rows that predate the index on an upgraded DB.
+ *
+ * Everything here is ADDITIVE and drop-safe — no column is altered or removed.
+ * If FTS5 is unavailable (a SQLite build without the module, or any setup
+ * failure) `ftsAvailable` stays false and search transparently uses the LIKE
+ * scan, so this can never break search or startup.
+ */
+function initRequestsFts(): void {
+  ftsAvailable = false;
+  try {
+    // `count(*)` on an external-content FTS table reflects the CONTENT table, not
+    // the index, so it cannot detect an unpopulated index. Whether the FTS table
+    // already existed BEFORE this CREATE is the reliable "needs backfill" signal.
+    const ftsExisted =
+      db
+        .query<{ name: string }, []>(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='requests_fts'"
+        )
+        .get() != null;
+
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS requests_fts USING fts5(
+        request_body,
+        response_body,
+        content='requests',
+        content_rowid='id'
+      );
+      CREATE TRIGGER IF NOT EXISTS requests_ai AFTER INSERT ON requests BEGIN
+        INSERT INTO requests_fts(rowid, request_body, response_body)
+        VALUES (new.id, new.request_body, new.response_body);
+      END;
+      CREATE TRIGGER IF NOT EXISTS requests_ad AFTER DELETE ON requests BEGIN
+        INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body)
+        VALUES ('delete', old.id, old.request_body, old.response_body);
+      END;
+      CREATE TRIGGER IF NOT EXISTS requests_au AFTER UPDATE ON requests BEGIN
+        INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body)
+        VALUES ('delete', old.id, old.request_body, old.response_body);
+        INSERT INTO requests_fts(rowid, request_body, response_body)
+        VALUES (new.id, new.request_body, new.response_body);
+      END;
+    `);
+
+    if (!ftsExisted) {
+      // One-time backfill: index rows written before the FTS table existed. On a
+      // fresh DB `requests` is empty so this is a cheap no-op; on an upgraded DB
+      // it runs exactly once (subsequent startups see the table and skip it).
+      db.exec("INSERT INTO requests_fts(requests_fts) VALUES('rebuild')");
+    }
+
+    ftsAvailable = true;
+  } catch (err) {
+    // Do NOT emit() here: this runs during initStorage, before the store is
+    // guaranteed usable for logging. A direct console.error mirrors the
+    // non-recursive fallback used elsewhere in this module.
+    ftsAvailable = false;
+    console.error(
+      "[storage.initRequestsFts] FTS5 unavailable — search will use the LIKE fallback:",
+      (err as Error).message
+    );
+  }
 }
 
 /**
@@ -357,7 +434,62 @@ export interface RequestFilters {
   order?: "asc" | "desc";
 }
 
-function buildRequestWhere(filters: RequestFilters): { where: string; vals: SQLQueryBindings[] } {
+/** Whether the FTS5 request-body search index is live (see initRequestsFts). */
+export function isFtsAvailable(): boolean {
+  return ftsAvailable;
+}
+
+/**
+ * Fault-injection seam for tests: force the FTS-availability flag so the LIKE
+ * fallback path can be exercised deterministically on builds that DO ship FTS5.
+ * Not part of the runtime contract — never call from production code.
+ */
+export function setFtsAvailableForTests(available: boolean): void {
+  ftsAvailable = available;
+}
+
+/**
+ * Turn a raw user search term into a safe FTS5 MATCH query. The whole term is
+ * wrapped as one double-quoted phrase (embedded quotes doubled) so FTS5 reads it
+ * as literal text — never as operators, column filters, or the AND/OR/NOT/NEAR
+ * keywords — and a trailing `*` makes the final token a prefix match.
+ *
+ * Behavior note (documented, not silent): this is TOKEN/prefix matching, which
+ * differs from the previous `LIKE '%term%'` substring scan — e.g. searching
+ * "laude" no longer matches inside "claude". The UI search field is labelled as
+ * full-text search to disclose this, and the LIKE scan remains the transparent
+ * fallback whenever FTS is unavailable.
+ */
+export function sanitizeFtsQuery(term: string): string {
+  return `"${term.replace(/"/g, '""')}"*`;
+}
+
+/**
+ * Build the SQL condition + bind values for the body-search filter. Uses an
+ * indexed FTS5 MATCH subquery when `useFts` is true (the FTS rowid equals
+ * `requests.id` via `content_rowid`), otherwise the original unindexed LIKE
+ * substring scan that FTS transparently falls back to.
+ */
+export function buildRequestSearchClause(
+  search: string,
+  useFts: boolean
+): { cond: string; vals: SQLQueryBindings[] } {
+  if (useFts) {
+    return {
+      cond: "id IN (SELECT rowid FROM requests_fts WHERE requests_fts MATCH ?)",
+      vals: [sanitizeFtsQuery(search)],
+    };
+  }
+  return {
+    cond: "(request_body LIKE ? OR response_body LIKE ?)",
+    vals: [`%${search}%`, `%${search}%`],
+  };
+}
+
+function buildRequestWhere(
+  filters: RequestFilters,
+  useFts: boolean = ftsAvailable
+): { where: string; vals: SQLQueryBindings[] } {
   const conds: string[] = [];
   const vals: SQLQueryBindings[] = [];
   if (filters.status?.length) { conds.push(`status IN (${filters.status.map(() => "?").join(",")})`); vals.push(...filters.status); }
@@ -370,38 +502,67 @@ function buildRequestWhere(filters: RequestFilters): { where: string; vals: SQLQ
   if (filters.timeTo) { conds.push("timestamp <= ?"); vals.push(filters.timeTo); }
   if (filters.minDuration != null) { conds.push("duration_ms >= ?"); vals.push(filters.minDuration); }
   if (filters.maxDuration != null) { conds.push("duration_ms <= ?"); vals.push(filters.maxDuration); }
-  if (filters.search) { conds.push("(request_body LIKE ? OR response_body LIKE ?)"); vals.push(`%${filters.search}%`, `%${filters.search}%`); }
+  if (filters.search) {
+    const { cond, vals: searchVals } = buildRequestSearchClause(filters.search, useFts);
+    conds.push(cond);
+    vals.push(...searchVals);
+  }
   return { where: conds.length ? `WHERE ${conds.join(" AND ")}` : "", vals };
+}
+
+/**
+ * Run a request query using the indexed FTS search path, transparently retrying
+ * with the LIKE substring scan if an FTS MATCH throws at runtime (design: "LIKE
+ * fallback on missing index / MATCH throw"). When there is no search term, or
+ * FTS is unavailable, the LIKE path is used directly with no retry cost.
+ */
+function withRequestSearch<T>(filters: RequestFilters, run: (useFts: boolean) => T): T {
+  const useFts = ftsAvailable && filters.search != null && filters.search !== "";
+  if (!useFts) return run(false);
+  try {
+    return run(true);
+  } catch (err) {
+    emit("warn", "storage.requestSearch.ftsFallback", {
+      search: filters.search,
+      error: (err as Error).message,
+    });
+    return run(false);
+  }
 }
 
 export function countRequests(filters: RequestFilters = {}): number {
   if (!db) return 0;
-  const { where, vals } = buildRequestWhere(filters);
-  const row = db.query<{ n: number }, SQLQueryBindings[]>(`SELECT COUNT(*) as n FROM requests ${where}`).get(...vals);
-  return row?.n ?? 0;
+  return withRequestSearch(filters, (useFts) => {
+    const { where, vals } = buildRequestWhere(filters, useFts);
+    const row = db.query<{ n: number }, SQLQueryBindings[]>(`SELECT COUNT(*) as n FROM requests ${where}`).get(...vals);
+    return row?.n ?? 0;
+  });
 }
 
 export function queryRequests(filters: RequestFilters = {}): RequestRecord[] {
   if (!db) return [];
-  const { where, vals } = buildRequestWhere(filters);
-  const limit = Math.min(filters.limit ?? 100, 1000);
-  const offset = filters.offset ?? 0;
-  const order = filters.order === "asc" ? "ASC" : "DESC";
-  const rows = db.query<RequestRecord, SQLQueryBindings[]>(
-    `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
-  ).all(...vals, limit, offset);
-  return rows;
+  return withRequestSearch(filters, (useFts) => {
+    const { where, vals } = buildRequestWhere(filters, useFts);
+    const limit = Math.min(filters.limit ?? 100, 1000);
+    const offset = filters.offset ?? 0;
+    const order = filters.order === "asc" ? "ASC" : "DESC";
+    return db.query<RequestRecord, SQLQueryBindings[]>(
+      `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
+    ).all(...vals, limit, offset);
+  });
 }
 
 export function queryRequestsRaw(filters: RequestFilters = {}): RequestRecord[] {
   if (!db) return [];
-  const { where, vals } = buildRequestWhere(filters);
-  const limit = Math.min(filters.limit ?? 100, 100_000);
-  const offset = filters.offset ?? 0;
-  const order = filters.order === "asc" ? "ASC" : "DESC";
-  return db.query<RequestRecord, SQLQueryBindings[]>(
-    `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
-  ).all(...vals, limit, offset);
+  return withRequestSearch(filters, (useFts) => {
+    const { where, vals } = buildRequestWhere(filters, useFts);
+    const limit = Math.min(filters.limit ?? 100, 100_000);
+    const offset = filters.offset ?? 0;
+    const order = filters.order === "asc" ? "ASC" : "DESC";
+    return db.query<RequestRecord, SQLQueryBindings[]>(
+      `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
+    ).all(...vals, limit, offset);
+  });
 }
 
 export function getRequestByTrace(traceId: string): RequestRecord | null {
