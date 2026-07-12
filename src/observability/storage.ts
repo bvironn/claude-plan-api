@@ -135,16 +135,6 @@ export function initStorage(dbPath: string = getTelemetryDbPath()): void {
 function initRequestsFts(): void {
   ftsAvailable = false;
   try {
-    // `count(*)` on an external-content FTS table reflects the CONTENT table, not
-    // the index, so it cannot detect an unpopulated index. Whether the FTS table
-    // already existed BEFORE this CREATE is the reliable "needs backfill" signal.
-    const ftsExisted =
-      db
-        .query<{ name: string }, []>(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name='requests_fts'"
-        )
-        .get() != null;
-
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS requests_fts USING fts5(
         request_body,
@@ -168,10 +158,31 @@ function initRequestsFts(): void {
       END;
     `);
 
-    if (!ftsExisted) {
-      // One-time backfill: index rows written before the FTS table existed. On a
-      // fresh DB `requests` is empty so this is a cheap no-op; on an upgraded DB
-      // it runs exactly once (subsequent startups see the table and skip it).
+    // Reconciliation-based backfill (self-healing on EVERY startup, not just
+    // once): compare the number of actually-INDEXED documents against the
+    // real `requests` row count, and rebuild whenever they differ.
+    //
+    // `count(*) FROM requests_fts` cannot be used for this: SQLite optimizes
+    // a column-less count(*) on an external-content FTS5 table by reading the
+    // CONTENT table's row count directly, so it returns the same number
+    // whether the index is populated or completely empty (verified
+    // empirically). `requests_fts_docsize` is a shadow table with exactly one
+    // row per rowid that has actually been INDEXED, so its count is the real
+    // signal.
+    //
+    // A mismatch means either: this is the first run against a pre-existing
+    // DB (index never built), or a crash happened between the CREATE VIRTUAL
+    // TABLE above committing and a previous rebuild completing. Running this
+    // check on every startup — instead of only when `sqlite_master` said the
+    // table didn't previously exist — makes the backfill correct regardless
+    // of crash timing. Two COUNT(*) queries are cheap even for a large
+    // `requests` table.
+    const indexedCount =
+      db.query<{ n: number }, []>("SELECT count(*) as n FROM requests_fts_docsize").get()?.n ?? 0;
+    const contentCount =
+      db.query<{ n: number }, []>("SELECT count(*) as n FROM requests").get()?.n ?? 0;
+
+    if (indexedCount !== contentCount) {
       db.exec("INSERT INTO requests_fts(requests_fts) VALUES('rebuild')");
     }
 
@@ -446,6 +457,33 @@ export function isFtsAvailable(): boolean {
  */
 export function setFtsAvailableForTests(available: boolean): void {
   ftsAvailable = available;
+}
+
+/**
+ * Fault-injection seam for tests: drop `requests_fts` (and its shadow tables,
+ * e.g. `requests_fts_docsize`) out from under the live connection, while
+ * leaving `ftsAvailable` untouched. Used to simulate either (a) a crash that
+ * left the index missing/unpopulated ahead of `reinitFtsForTests()`, or (b) a
+ * runtime FTS5 write failure (`no such table`) ahead of insertRequest /
+ * updateRequest, to prove the base `requests` write survives independent of
+ * the FTS sync (RESIL-001, RESIL-002). Not part of the runtime contract —
+ * never call from production code.
+ */
+export function dropFtsTableForTests(): void {
+  db.exec("DROP TABLE IF EXISTS requests_fts");
+}
+
+/**
+ * Fault-injection seam for tests: re-run the FTS init/reconciliation logic on
+ * the CURRENT connection, without recreating the whole database (unlike
+ * calling initStorage() again, which would open a brand-new `:memory:`
+ * database and lose any seeded rows). Used to simulate "restart after a
+ * crash" against data that already exists in `requests` (RESIL-001 /
+ * REL-001). Not part of the runtime contract — never call from production
+ * code.
+ */
+export function reinitFtsForTests(): void {
+  initRequestsFts();
 }
 
 /**
