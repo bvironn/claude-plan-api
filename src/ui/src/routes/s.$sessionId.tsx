@@ -87,7 +87,7 @@ function SessionDetailPage() {
     enabled: !!conversation,
     refetchInterval: SESSION_GROUPING_REFETCH_INTERVAL_MS,
     queryFn: async () => {
-      if (!conversation) return []
+      if (!conversation) return { results: [], failedTraceIds: [] }
       const settled = await Promise.all(
         conversation.traceIds.map((id, i, arr) =>
           queryClient
