@@ -81,6 +81,13 @@ export interface ApiKeyMeta {
   is_admin: number;
   /** UTC ISO timestamp of the most recent rotation; `null`/undefined means never rotated. */
   rotated_at?: string | null;
+  /**
+   * UTC ISO timestamp of the key's most recent attributed `requests` row,
+   * computed UNWINDOWED (correlated `MAX(timestamp)` over `requests` by
+   * `api_key_id`, index-backed by `idx_requests_api_key`) — independent of the
+   * 30-day window that bounds `getUsageByApiKey()`. `null` means never used.
+   */
+  last_used_at: string | null;
 }
 
 /**

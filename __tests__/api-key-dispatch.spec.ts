@@ -295,7 +295,7 @@ describe("dispatch — enforcement ON: /api/keys reaches its handlers with a val
     stubUpdateRequest();
     const list = push(
       spyOn(storage, "listApiKeys").mockReturnValue([
-        { id: 7, prefix: "cpk_deadbeef", label: "ci-runner", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1 },
+        { id: 7, prefix: "cpk_deadbeef", label: "ci-runner", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1, last_used_at: null },
       ])
     );
 
@@ -339,7 +339,7 @@ describe("dispatch — enforcement ON: /api/keys reaches its handlers with a val
     stubUpdateRequest();
     push(
       spyOn(storage, "listApiKeys").mockReturnValue([
-        { id: 5, prefix: "cpk_deadbeef", label: "old", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1 },
+        { id: 5, prefix: "cpk_deadbeef", label: "old", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1, last_used_at: null },
       ])
     );
     const upd = push(spyOn(storage, "updateApiKeyLabel").mockReturnValue(true));
@@ -528,7 +528,7 @@ describe("dispatch — enforcement ON: POST /api/keys/:id/rotate invalidates the
     );
     push(
       spyOn(storage, "listApiKeys").mockImplementation(() => [
-        { id: 7, prefix: currentPrefix, label: "ci-runner", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1 },
+        { id: 7, prefix: currentPrefix, label: "ci-runner", created_at: "2026-01-01T00:00:00Z", revoked_at: null, is_admin: 1, last_used_at: null },
       ])
     );
     push(

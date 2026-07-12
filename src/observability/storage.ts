@@ -752,8 +752,15 @@ export function getApiKeyByHash(hash: string): ApiKeyRecord | null {
  */
 export function listApiKeys(): ApiKeyMeta[] {
   if (!db) return [];
+  // `last_used_at` is an UNWINDOWED correlated MAX(timestamp) over `requests`
+  // attributed to this key (`api_key_id = api_keys.id`, index-backed by
+  // `idx_requests_api_key`). It is deliberately NOT derived from the 30-day
+  // `getUsageByApiKey()` window: a key idle > 30 days must still report its real
+  // last-used timestamp, never a false `null`. `MAX(...)` over zero matching
+  // rows yields SQL NULL → JS `null` (never used).
   return db.query<ApiKeyMeta, []>(
-    `SELECT id, prefix, label, created_at, revoked_at, is_admin, rotated_at
+    `SELECT id, prefix, label, created_at, revoked_at, is_admin, rotated_at,
+            (SELECT MAX(timestamp) FROM requests WHERE api_key_id = api_keys.id) AS last_used_at
      FROM api_keys ORDER BY created_at DESC`
   ).all();
 }

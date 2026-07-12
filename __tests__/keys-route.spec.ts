@@ -38,8 +38,8 @@ function push<T extends { mockRestore: () => void }>(spy: T): T {
 }
 
 const SAMPLE_META: ApiKeyMeta[] = [
-  { id: 2, prefix: "cpk_newer", label: "newer", created_at: "2026-03-01T00:00:00Z", revoked_at: null, is_admin: 1 },
-  { id: 1, prefix: "cpk_older", label: "older", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z", is_admin: 0 },
+  { id: 2, prefix: "cpk_newer", label: "newer", created_at: "2026-03-01T00:00:00Z", revoked_at: null, is_admin: 1, last_used_at: "2026-03-15T00:00:00Z" },
+  { id: 1, prefix: "cpk_older", label: "older", created_at: "2026-01-01T00:00:00Z", revoked_at: "2026-02-01T00:00:00Z", is_admin: 0, last_used_at: null },
 ];
 
 // ---------------------------------------------------------------------------
@@ -267,6 +267,7 @@ const ACTIVE_KEY: ApiKeyMeta = {
   created_at: "2026-05-01T00:00:00Z",
   revoked_at: null,
   is_admin: 0,
+  last_used_at: null,
 };
 const REVOKED_KEY: ApiKeyMeta = {
   id: 4,
@@ -275,6 +276,7 @@ const REVOKED_KEY: ApiKeyMeta = {
   created_at: "2026-01-01T00:00:00Z",
   revoked_at: "2026-02-01T00:00:00Z",
   is_admin: 0,
+  last_used_at: null,
 };
 
 describe("route — PATCH /api/keys/:id (rename)", () => {
