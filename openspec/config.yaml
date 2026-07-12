@@ -28,7 +28,18 @@ testing:
   quality:
     linter: false
     type_checker: true
-    command: bun run tsc --noEmit
+    # Root tsc excludes src/ui (it's a separate Vite project, see tsconfig.json)
+    # — it alone can NEVER catch a src/ui-only type error. The dashboard-
+    # performance-2 incident (2026-07-11): a widened RequestRecord type broke
+    # src/ui's own `tsc -b` production build, causing a prod outage, because
+    # every verify/review step in that change only ran the root command below.
+    # Both commands are REQUIRED for a clean type-check claim. Use `;`, NOT
+    # `&&` — root tsc has a documented pre-existing non-zero baseline (see
+    # README "known pre-existing errors"), so `&&` would short-circuit and
+    # silently never run the UI check at all. Compare each command's own
+    # output against its own baseline; do not treat this as one combined
+    # pass/fail exit code.
+    command: bun run tsc --noEmit; (cd src/ui && bun run typecheck)
     formatter: false
 
 rules:
@@ -51,7 +62,10 @@ rules:
     test_command: bun test
   verify:
     test_command: bun test
-    build_command: bun run tsc --noEmit
+    # `;` not `&&` — see quality.command comment above: root tsc's known
+    # pre-existing baseline errors would short-circuit an `&&` chain and
+    # silently skip the src/ui typecheck. Run and check both independently.
+    build_command: bun run tsc --noEmit; (cd src/ui && bun run typecheck)
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas
