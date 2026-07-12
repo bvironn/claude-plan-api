@@ -187,6 +187,7 @@ function KeysTable({
             <TableHead>Label</TableHead>
             <TableHead className="w-[130px]">Created</TableHead>
             <TableHead className="w-[170px] text-right">Usage (last 30d)</TableHead>
+            <TableHead className="w-[120px]">Last used</TableHead>
             <TableHead className="w-[90px]">Status</TableHead>
             <TableHead className="w-[170px] text-right">Actions</TableHead>
           </TableRow>
@@ -258,6 +259,9 @@ function KeyRow({
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
+      </TableCell>
+      <TableCell className="text-muted-foreground text-xs">
+        {formatRelativeTime(apiKey.last_used_at)}
       </TableCell>
       <TableCell>
         {revoked ? (
