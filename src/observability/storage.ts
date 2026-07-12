@@ -13,6 +13,10 @@ import { emit } from "./logger.ts";
 
 let db: Database;
 
+// Whether the external-content FTS5 index for request/response bodies is live.
+// Set by initStorage(); when false the search filter falls back to a LIKE scan.
+let ftsAvailable = false;
+
 /**
  * Open (or create) the telemetry SQLite database and ensure the schema.
  *
@@ -109,6 +113,94 @@ export function initStorage(dbPath: string = getTelemetryDbPath()): void {
   ensureColumn("api_keys", "rotated_at", "TEXT");
   // Index must be created AFTER ensureColumn so pre-existing DBs have the column.
   db.exec("CREATE INDEX IF NOT EXISTS idx_requests_api_key ON requests(api_key_id)");
+
+  initRequestsFts();
+}
+
+/**
+ * Stand up the full-text search index for `requests(request_body, response_body)`
+ * (finding #6). The `search` filter used to run an unindexed `LIKE '%term%'`
+ * scan over those large TEXT columns; this backs it with an FTS5 index instead.
+ *
+ * The index is an EXTERNAL-CONTENT FTS5 table (`content='requests'`): the base
+ * `requests` table stays the single source of truth and the FTS table only holds
+ * the inverted index. AFTER INSERT/UPDATE/DELETE triggers keep it in sync, and a
+ * one-time `rebuild` backfills rows that predate the index on an upgraded DB.
+ *
+ * Everything here is ADDITIVE and drop-safe — no column is altered or removed.
+ * If FTS5 is unavailable (a SQLite build without the module, or any setup
+ * failure) `ftsAvailable` stays false and search transparently uses the LIKE
+ * scan, so this can never break search or startup.
+ */
+function initRequestsFts(): void {
+  ftsAvailable = false;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS requests_fts USING fts5(
+        request_body,
+        response_body,
+        content='requests',
+        content_rowid='id'
+      );
+      -- INSERT/UPDATE indexing used to be synced via AFTER triggers that ran
+      -- in the SAME statement/transaction as the base write (requests_ai /
+      -- requests_au). That coupling meant a single bad FTS5 write (corrupt
+      -- index, disk full, an error inside the vtable) aborted the WHOLE
+      -- triggering statement, silently dropping the actual telemetry row
+      -- along with the index update (RESIL-002). insertRequest/updateRequest
+      -- now perform this sync as an explicit, separate, best-effort step
+      -- (see syncFtsRow) AFTER the base write has already committed, so an
+      -- index failure can never lose real data. Drop any triggers a
+      -- pre-existing (already-deployed) DB may still carry from before this
+      -- change — leaving them in place would double-index every write (once
+      -- via the stale trigger, once via the new app-level sync).
+      DROP TRIGGER IF EXISTS requests_ai;
+      DROP TRIGGER IF EXISTS requests_au;
+      CREATE TRIGGER IF NOT EXISTS requests_ad AFTER DELETE ON requests BEGIN
+        INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body)
+        VALUES ('delete', old.id, old.request_body, old.response_body);
+      END;
+    `);
+
+    // Reconciliation-based backfill (self-healing on EVERY startup, not just
+    // once): compare the number of actually-INDEXED documents against the
+    // real `requests` row count, and rebuild whenever they differ.
+    //
+    // `count(*) FROM requests_fts` cannot be used for this: SQLite optimizes
+    // a column-less count(*) on an external-content FTS5 table by reading the
+    // CONTENT table's row count directly, so it returns the same number
+    // whether the index is populated or completely empty (verified
+    // empirically). `requests_fts_docsize` is a shadow table with exactly one
+    // row per rowid that has actually been INDEXED, so its count is the real
+    // signal.
+    //
+    // A mismatch means either: this is the first run against a pre-existing
+    // DB (index never built), or a crash happened between the CREATE VIRTUAL
+    // TABLE above committing and a previous rebuild completing. Running this
+    // check on every startup — instead of only when `sqlite_master` said the
+    // table didn't previously exist — makes the backfill correct regardless
+    // of crash timing. Two COUNT(*) queries are cheap even for a large
+    // `requests` table.
+    const indexedCount =
+      db.query<{ n: number }, []>("SELECT count(*) as n FROM requests_fts_docsize").get()?.n ?? 0;
+    const contentCount =
+      db.query<{ n: number }, []>("SELECT count(*) as n FROM requests").get()?.n ?? 0;
+
+    if (indexedCount !== contentCount) {
+      db.exec("INSERT INTO requests_fts(requests_fts) VALUES('rebuild')");
+    }
+
+    ftsAvailable = true;
+  } catch (err) {
+    // Do NOT emit() here: this runs during initStorage, before the store is
+    // guaranteed usable for logging. A direct console.error mirrors the
+    // non-recursive fallback used elsewhere in this module.
+    ftsAvailable = false;
+    console.error(
+      "[storage.initRequestsFts] FTS5 unavailable — search will use the LIKE fallback:",
+      (err as Error).message
+    );
+  }
 }
 
 /**
@@ -218,10 +310,46 @@ export function insertEvent(e: TelemetryEvent): void {
   }
 }
 
+/**
+ * Synchronize one row's indexed content into `requests_fts`. Called AFTER the
+ * base `requests` write (insert or update) has already committed, in its own
+ * try/catch — a failure here is logged via emit() and swallowed, NEVER
+ * re-thrown, so an FTS5 write failure (corrupt index, an error inside the
+ * vtable, disk full) can never cause the actual telemetry row to be rolled
+ * back or lost. This replaces the old AFTER INSERT / AFTER UPDATE triggers,
+ * which ran in the SAME statement as the base write and could therefore abort
+ * it (RESIL-002).
+ *
+ * `previous` must be the content column values as they were indexed BEFORE
+ * this write (omit for a fresh INSERT) — FTS5's external-content 'delete'
+ * command needs the OLD values to correctly remove the old terms before the
+ * new ones are inserted, mirroring what the AFTER UPDATE trigger used to do.
+ */
+function syncFtsRow(
+  id: number,
+  next: { request_body: string | null; response_body: string | null },
+  previous?: { request_body: string | null; response_body: string | null }
+): void {
+  if (!ftsAvailable) return;
+  try {
+    if (previous) {
+      db.prepare(
+        "INSERT INTO requests_fts(requests_fts, rowid, request_body, response_body) VALUES ('delete', ?, ?, ?)"
+      ).run(id, previous.request_body, previous.response_body);
+    }
+    db.prepare(
+      "INSERT INTO requests_fts(rowid, request_body, response_body) VALUES (?, ?, ?)"
+    ).run(id, next.request_body, next.response_body);
+  } catch (err) {
+    emit("warn", "storage.fts.syncFailed", { id, error: (err as Error).message });
+  }
+}
+
 export function insertRequest(r: RequestRecord): void {
   if (!db) return;
+  let insertedId: number | undefined;
   try {
-    getInsertRequest().run(
+    const result = getInsertRequest().run(
       r.trace_id,
       r.timestamp,
       r.method ?? null,
@@ -242,21 +370,83 @@ export function insertRequest(r: RequestRecord): void {
       r.error ?? null,
       r.api_key_id ?? null
     );
+    // `INSERT OR IGNORE` skips silently on a duplicate trace_id — `changes` is
+    // 0 in that case and `lastInsertRowid` still points at the PREVIOUS
+    // insert, so it must only be used when a row was actually written.
+    if (result.changes > 0) {
+      insertedId = Number(result.lastInsertRowid);
+    }
   } catch (err) {
     emit("error", "storage.insertRequest.failed", { traceId: r.trace_id, error: (err as Error).message });
+    return;
+  }
+
+  // FTS sync is a separate, best-effort step (see syncFtsRow) — a failure
+  // here must never hide the fact that the `requests` row above was already
+  // committed successfully (RESIL-002).
+  if (insertedId != null) {
+    syncFtsRow(insertedId, {
+      request_body: r.request_body ?? null,
+      response_body: r.response_body ?? null,
+    });
   }
 }
 
 export function updateRequest(traceId: string, patch: Partial<RequestRecord>): void {
   if (!db) return;
+  const touchesBody = "request_body" in patch || "response_body" in patch;
+  let ftsSync:
+    | {
+        id: number;
+        next: { request_body: string | null; response_body: string | null };
+        previous: { request_body: string | null; response_body: string | null };
+      }
+    | undefined;
+
   try {
     const fields = Object.keys(patch).filter((k) => k !== "trace_id");
     if (fields.length === 0) return;
+
+    // Only the FTS index columns (request_body/response_body) need a resync;
+    // read the pre-update values first so syncFtsRow can issue the matching
+    // delete+insert FTS5 requires (see its doc comment) — but only pay this
+    // extra query when the patch actually touches one of those columns.
+    let before: { id: number; request_body: string | null; response_body: string | null } | null =
+      null;
+    if (touchesBody) {
+      before =
+        db
+          .query<
+            { id: number; request_body: string | null; response_body: string | null },
+            [string]
+          >("SELECT id, request_body, response_body FROM requests WHERE trace_id = ?")
+          .get(traceId) ?? null;
+    }
+
     const set = fields.map((f) => `${f} = ?`).join(", ");
     const values = fields.map((f) => (patch as Record<string, unknown>)[f] ?? null);
     db.prepare(`UPDATE requests SET ${set} WHERE trace_id = ?`).run(...values as never[], traceId);
+
+    if (before) {
+      ftsSync = {
+        id: before.id,
+        previous: { request_body: before.request_body, response_body: before.response_body },
+        next: {
+          request_body: "request_body" in patch ? (patch.request_body ?? null) : before.request_body,
+          response_body:
+            "response_body" in patch ? (patch.response_body ?? null) : before.response_body,
+        },
+      };
+    }
   } catch (err) {
     emit("error", "storage.updateRequest.failed", { traceId, error: (err as Error).message });
+    return;
+  }
+
+  // See syncFtsRow: runs after the base UPDATE has committed, in its own
+  // failure domain (RESIL-002).
+  if (ftsSync) {
+    syncFtsRow(ftsSync.id, ftsSync.next, ftsSync.previous);
   }
 }
 
@@ -357,7 +547,89 @@ export interface RequestFilters {
   order?: "asc" | "desc";
 }
 
-function buildRequestWhere(filters: RequestFilters): { where: string; vals: SQLQueryBindings[] } {
+/** Whether the FTS5 request-body search index is live (see initRequestsFts). */
+export function isFtsAvailable(): boolean {
+  return ftsAvailable;
+}
+
+/**
+ * Fault-injection seam for tests: force the FTS-availability flag so the LIKE
+ * fallback path can be exercised deterministically on builds that DO ship FTS5.
+ * Not part of the runtime contract — never call from production code.
+ */
+export function setFtsAvailableForTests(available: boolean): void {
+  ftsAvailable = available;
+}
+
+/**
+ * Fault-injection seam for tests: drop `requests_fts` (and its shadow tables,
+ * e.g. `requests_fts_docsize`) out from under the live connection, while
+ * leaving `ftsAvailable` untouched. Used to simulate either (a) a crash that
+ * left the index missing/unpopulated ahead of `reinitFtsForTests()`, or (b) a
+ * runtime FTS5 write failure (`no such table`) ahead of insertRequest /
+ * updateRequest, to prove the base `requests` write survives independent of
+ * the FTS sync (RESIL-001, RESIL-002). Not part of the runtime contract —
+ * never call from production code.
+ */
+export function dropFtsTableForTests(): void {
+  db.exec("DROP TABLE IF EXISTS requests_fts");
+}
+
+/**
+ * Fault-injection seam for tests: re-run the FTS init/reconciliation logic on
+ * the CURRENT connection, without recreating the whole database (unlike
+ * calling initStorage() again, which would open a brand-new `:memory:`
+ * database and lose any seeded rows). Used to simulate "restart after a
+ * crash" against data that already exists in `requests` (RESIL-001 /
+ * REL-001). Not part of the runtime contract — never call from production
+ * code.
+ */
+export function reinitFtsForTests(): void {
+  initRequestsFts();
+}
+
+/**
+ * Turn a raw user search term into a safe FTS5 MATCH query. The whole term is
+ * wrapped as one double-quoted phrase (embedded quotes doubled) so FTS5 reads it
+ * as literal text — never as operators, column filters, or the AND/OR/NOT/NEAR
+ * keywords — and a trailing `*` makes the final token a prefix match.
+ *
+ * Behavior note (documented, not silent): this is TOKEN/prefix matching, which
+ * differs from the previous `LIKE '%term%'` substring scan — e.g. searching
+ * "laude" no longer matches inside "claude". The UI search field is labelled as
+ * full-text search to disclose this, and the LIKE scan remains the transparent
+ * fallback whenever FTS is unavailable.
+ */
+export function sanitizeFtsQuery(term: string): string {
+  return `"${term.replace(/"/g, '""')}"*`;
+}
+
+/**
+ * Build the SQL condition + bind values for the body-search filter. Uses an
+ * indexed FTS5 MATCH subquery when `useFts` is true (the FTS rowid equals
+ * `requests.id` via `content_rowid`), otherwise the original unindexed LIKE
+ * substring scan that FTS transparently falls back to.
+ */
+export function buildRequestSearchClause(
+  search: string,
+  useFts: boolean
+): { cond: string; vals: SQLQueryBindings[] } {
+  if (useFts) {
+    return {
+      cond: "id IN (SELECT rowid FROM requests_fts WHERE requests_fts MATCH ?)",
+      vals: [sanitizeFtsQuery(search)],
+    };
+  }
+  return {
+    cond: "(request_body LIKE ? OR response_body LIKE ?)",
+    vals: [`%${search}%`, `%${search}%`],
+  };
+}
+
+function buildRequestWhere(
+  filters: RequestFilters,
+  useFts: boolean = ftsAvailable
+): { where: string; vals: SQLQueryBindings[] } {
   const conds: string[] = [];
   const vals: SQLQueryBindings[] = [];
   if (filters.status?.length) { conds.push(`status IN (${filters.status.map(() => "?").join(",")})`); vals.push(...filters.status); }
@@ -370,38 +642,67 @@ function buildRequestWhere(filters: RequestFilters): { where: string; vals: SQLQ
   if (filters.timeTo) { conds.push("timestamp <= ?"); vals.push(filters.timeTo); }
   if (filters.minDuration != null) { conds.push("duration_ms >= ?"); vals.push(filters.minDuration); }
   if (filters.maxDuration != null) { conds.push("duration_ms <= ?"); vals.push(filters.maxDuration); }
-  if (filters.search) { conds.push("(request_body LIKE ? OR response_body LIKE ?)"); vals.push(`%${filters.search}%`, `%${filters.search}%`); }
+  if (filters.search) {
+    const { cond, vals: searchVals } = buildRequestSearchClause(filters.search, useFts);
+    conds.push(cond);
+    vals.push(...searchVals);
+  }
   return { where: conds.length ? `WHERE ${conds.join(" AND ")}` : "", vals };
+}
+
+/**
+ * Run a request query using the indexed FTS search path, transparently retrying
+ * with the LIKE substring scan if an FTS MATCH throws at runtime (design: "LIKE
+ * fallback on missing index / MATCH throw"). When there is no search term, or
+ * FTS is unavailable, the LIKE path is used directly with no retry cost.
+ */
+function withRequestSearch<T>(filters: RequestFilters, run: (useFts: boolean) => T): T {
+  const useFts = ftsAvailable && filters.search != null && filters.search !== "";
+  if (!useFts) return run(false);
+  try {
+    return run(true);
+  } catch (err) {
+    emit("warn", "storage.requestSearch.ftsFallback", {
+      search: filters.search,
+      error: (err as Error).message,
+    });
+    return run(false);
+  }
 }
 
 export function countRequests(filters: RequestFilters = {}): number {
   if (!db) return 0;
-  const { where, vals } = buildRequestWhere(filters);
-  const row = db.query<{ n: number }, SQLQueryBindings[]>(`SELECT COUNT(*) as n FROM requests ${where}`).get(...vals);
-  return row?.n ?? 0;
+  return withRequestSearch(filters, (useFts) => {
+    const { where, vals } = buildRequestWhere(filters, useFts);
+    const row = db.query<{ n: number }, SQLQueryBindings[]>(`SELECT COUNT(*) as n FROM requests ${where}`).get(...vals);
+    return row?.n ?? 0;
+  });
 }
 
 export function queryRequests(filters: RequestFilters = {}): RequestRecord[] {
   if (!db) return [];
-  const { where, vals } = buildRequestWhere(filters);
-  const limit = Math.min(filters.limit ?? 100, 1000);
-  const offset = filters.offset ?? 0;
-  const order = filters.order === "asc" ? "ASC" : "DESC";
-  const rows = db.query<RequestRecord, SQLQueryBindings[]>(
-    `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
-  ).all(...vals, limit, offset);
-  return rows;
+  return withRequestSearch(filters, (useFts) => {
+    const { where, vals } = buildRequestWhere(filters, useFts);
+    const limit = Math.min(filters.limit ?? 100, 1000);
+    const offset = filters.offset ?? 0;
+    const order = filters.order === "asc" ? "ASC" : "DESC";
+    return db.query<RequestRecord, SQLQueryBindings[]>(
+      `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
+    ).all(...vals, limit, offset);
+  });
 }
 
 export function queryRequestsRaw(filters: RequestFilters = {}): RequestRecord[] {
   if (!db) return [];
-  const { where, vals } = buildRequestWhere(filters);
-  const limit = Math.min(filters.limit ?? 100, 100_000);
-  const offset = filters.offset ?? 0;
-  const order = filters.order === "asc" ? "ASC" : "DESC";
-  return db.query<RequestRecord, SQLQueryBindings[]>(
-    `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
-  ).all(...vals, limit, offset);
+  return withRequestSearch(filters, (useFts) => {
+    const { where, vals } = buildRequestWhere(filters, useFts);
+    const limit = Math.min(filters.limit ?? 100, 100_000);
+    const offset = filters.offset ?? 0;
+    const order = filters.order === "asc" ? "ASC" : "DESC";
+    return db.query<RequestRecord, SQLQueryBindings[]>(
+      `SELECT * FROM requests ${where} ORDER BY timestamp ${order} LIMIT ? OFFSET ?`
+    ).all(...vals, limit, offset);
+  });
 }
 
 export function getRequestByTrace(traceId: string): RequestRecord | null {
