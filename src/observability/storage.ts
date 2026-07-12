@@ -525,17 +525,46 @@ export interface UsageFilters {
 }
 
 /**
+ * Default lookback window `getUsageByApiKey()` applies when the caller supplies
+ * no `timeFrom`. This is a storage-layer chokepoint: the /api/telemetry/usage
+ * route is polled roughly every 15s by the keys dashboard with no window, so
+ * without this bound every poll would aggregate the ENTIRE `requests` history.
+ * 30 days matches a typical usage/billing period while keeping the scan bounded.
+ *
+ * The default only fills in for an ABSENT lower bound — a caller can widen or
+ * narrow the window with an explicit `timeFrom` (e.g. `"1970-01-01T00:00:00Z"`
+ * for full history).
+ */
+export const DEFAULT_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Resolve the effective `timeFrom` a {@link getUsageByApiKey} call will apply:
+ * the caller-supplied value verbatim, or the `DEFAULT_USAGE_WINDOW_MS`
+ * lookback boundary when omitted. Exported so callers outside this module
+ * (the `/api/telemetry/usage` route's DTO) can report the ACTUAL window that
+ * was applied instead of masking a silently-imposed default behind `null`
+ * (REL-001) — without duplicating the default-window arithmetic.
+ */
+export function resolveUsageTimeFrom(timeFrom?: string): string {
+  return timeFrom ?? new Date(Date.now() - DEFAULT_USAGE_WINDOW_MS).toISOString();
+}
+
+/**
  * Aggregate per-key usage from the `requests` table: request count and summed
  * token columns grouped by `api_key_id`, joined to `api_keys` for prefix/label.
  * Only attributed rows (`api_key_id IS NOT NULL`) are included. An optional
- * `timeFrom`/`timeTo` window bounds the rows. Mirrors the `getMetrics()`
- * `SUM(...)` idiom; returns `[]` (not an error) when nothing matches.
+ * `timeFrom`/`timeTo` window bounds the rows; when `timeFrom` is omitted the
+ * storage layer enforces `DEFAULT_USAGE_WINDOW_MS` so aggregation never scans
+ * the full history. Mirrors the `getMetrics()` `SUM(...)` idiom; returns `[]`
+ * (not an error) when nothing matches.
  */
 export function getUsageByApiKey(filters: UsageFilters = {}): UsageByKey[] {
   if (!db) return [];
-  const conds: string[] = ["r.api_key_id IS NOT NULL"];
-  const vals: SQLQueryBindings[] = [];
-  if (filters.timeFrom) { conds.push("r.timestamp >= ?"); vals.push(filters.timeFrom); }
+  // Chokepoint: an absent lower bound defaults to a bounded lookback window
+  // rather than the full `requests` history.
+  const timeFrom = resolveUsageTimeFrom(filters.timeFrom);
+  const conds: string[] = ["r.api_key_id IS NOT NULL", "r.timestamp >= ?"];
+  const vals: SQLQueryBindings[] = [timeFrom];
   if (filters.timeTo) { conds.push("r.timestamp <= ?"); vals.push(filters.timeTo); }
   const where = `WHERE ${conds.join(" AND ")}`;
   return db.query<UsageByKey, SQLQueryBindings[]>(`
@@ -571,6 +600,23 @@ export interface Metrics {
   errorsByRoute: Record<string, number>;
 }
 
+/**
+ * Upper bound on the latency sample `getMetrics()` sorts for percentile
+ * computation. Instead of scanning every `duration_ms` row in the window
+ * (unbounded memory + sort cost under load), we take the most-recent
+ * SAMPLE_CAP rows (`ORDER BY timestamp DESC LIMIT SAMPLE_CAP`) and compute
+ * p50/p95/p99 over that sample in JS.
+ *
+ * Tolerance / approximation: when the window holds MORE than SAMPLE_CAP
+ * requests, the reported percentiles describe the most-recent SAMPLE_CAP
+ * requests (a recency-biased sample), not the entire window — a burst of old
+ * outliers no longer skews the tail. When the window holds SAMPLE_CAP or fewer
+ * requests, the result is EXACT (identical to the prior unbounded scan). A
+ * deterministic recency cap (NOT reservoir sampling) is used on purpose so the
+ * values are reproducible and tests never depend on an RNG seed.
+ */
+export const SAMPLE_CAP = 10_000;
+
 export function getMetrics(windowMs: number = 60_000): Metrics {
   if (!db) return {
     eventsPerMin: 0, activeErrors: 0, latencyP50: 0, latencyP95: 0, latencyP99: 0,
@@ -580,9 +626,9 @@ export function getMetrics(windowMs: number = 60_000): Metrics {
   const since = new Date(Date.now() - windowMs).toISOString();
   const evRow = db.query<{ n: number }, [string]>("SELECT COUNT(*) as n FROM events WHERE timestamp >= ?").get(since);
   const errRow = db.query<{ n: number }, [string]>("SELECT COUNT(*) as n FROM events WHERE level IN ('error','fatal') AND timestamp >= ?").get(since);
-  const latRows = db.query<{ duration_ms: number }, [string]>(
-    "SELECT duration_ms FROM requests WHERE timestamp >= ? AND duration_ms IS NOT NULL ORDER BY duration_ms"
-  ).all(since);
+  const latRows = db.query<{ duration_ms: number }, [string, number]>(
+    "SELECT duration_ms FROM requests WHERE timestamp >= ? AND duration_ms IS NOT NULL ORDER BY timestamp DESC LIMIT ?"
+  ).all(since, SAMPLE_CAP);
   const totRow = db.query<{ n: number }, [string]>("SELECT COUNT(*) as n FROM requests WHERE timestamp >= ?").get(since);
   const statusRows = db.query<{ status: number; n: number }, [string]>(
     "SELECT status, COUNT(*) as n FROM requests WHERE timestamp >= ? GROUP BY status"
@@ -594,7 +640,9 @@ export function getMetrics(windowMs: number = 60_000): Metrics {
     "SELECT path, COUNT(*) as n FROM requests WHERE timestamp >= ? AND status >= 500 GROUP BY path"
   ).all(since);
 
-  const durations = latRows.map((r) => r.duration_ms);
+  // The capped sample comes back ordered by recency (timestamp DESC); sort it
+  // ascending by duration so the nearest-rank percentile index is meaningful.
+  const durations = latRows.map((r) => r.duration_ms).sort((a, b) => a - b);
   const p = (pct: number): number =>
     durations.length ? (durations[Math.floor(durations.length * pct / 100)] ?? 0) : 0;
   const byStatus: Record<number, number> = {};

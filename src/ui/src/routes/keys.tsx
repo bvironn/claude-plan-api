@@ -186,7 +186,7 @@ function KeysTable({
             <TableHead>Prefix</TableHead>
             <TableHead>Label</TableHead>
             <TableHead className="w-[130px]">Created</TableHead>
-            <TableHead className="w-[170px] text-right">Usage</TableHead>
+            <TableHead className="w-[170px] text-right">Usage (last 30d)</TableHead>
             <TableHead className="w-[90px]">Status</TableHead>
             <TableHead className="w-[170px] text-right">Actions</TableHead>
           </TableRow>
