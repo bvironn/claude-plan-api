@@ -103,13 +103,13 @@ export function TechnicalPanel({ request }: { request: RequestRecord }) {
               <TabsTrigger value="response">Response</TabsTrigger>
             </TabsList>
             <TabsContent value="client" className="mt-2">
-              <JsonBlock content={request.requestBody} />
+              <JsonBlock content={request.requestBody ?? null} />
             </TabsContent>
             <TabsContent value="upstream" className="mt-2">
-              <JsonBlock content={request.upstreamRequestBody} />
+              <JsonBlock content={request.upstreamRequestBody ?? null} />
             </TabsContent>
             <TabsContent value="response" className="mt-2">
-              <JsonBlock content={request.responseBody} />
+              <JsonBlock content={request.responseBody ?? null} />
             </TabsContent>
           </Tabs>
         </CardContent>
