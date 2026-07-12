@@ -1,5 +1,45 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { handleTokensCount } from "../src/http/routes/tokens.ts";
+import { __seedRegistryForTests } from "../src/domain/models.ts";
+import type { UpstreamModel } from "../src/upstream/models-client.ts";
+
+function seedModel(
+  partial: Partial<UpstreamModel> & Pick<UpstreamModel, "id" | "displayName">,
+): UpstreamModel {
+  return {
+    createdAt: null,
+    maxInputTokens: null,
+    maxOutputTokens: null,
+    adaptiveThinking: false,
+    thinkingEnabled: false,
+    contextManagement: false,
+    outputEffort: false,
+    structuredOutputs: false,
+    imageInput: false,
+    pdfInput: false,
+    citations: false,
+    codeExecution: false,
+    batch: false,
+    effortLevels: [],
+    contextManagementEdits: [],
+    ...partial,
+  };
+}
+
+function imageTokensBody(model: string): Record<string, unknown> {
+  return {
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "count this" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAA" } },
+        ],
+      },
+    ],
+  };
+}
 
 let fetchSpy: ReturnType<typeof spyOn> | null = null;
 let credentialsSpy: ReturnType<typeof spyOn> | null = null;
@@ -107,6 +147,34 @@ describe("POST /v1/tokens/count", () => {
       messages: [{ role: "user", content: "x" }],
     }));
     expect(res.status).toBe(503);
+  });
+
+  // --- Vision capability gate: token counting rejects confirmed-negative image ---
+  test("confirmed-negative image request → 400 with type proxy_error, code 400", async () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "text-only-model", displayName: "Text Only", imageInput: false }),
+    ]);
+    try {
+      const res = await handleTokensCount(postJSON(imageTokensBody("text-only-model")));
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { message: string; type: string; code: number } };
+      expect(body.error.type).toBe("proxy_error");
+      expect(body.error.code).toBe(400);
+      // Must NOT have reached the count_tokens upstream.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      undo();
+    }
+  });
+
+  test("unverified image request fails open → reaches count_tokens upstream, 200", async () => {
+    const undo = __seedRegistryForTests(null);
+    try {
+      const res = await handleTokensCount(postJSON(imageTokensBody("claude-opus-4-6")));
+      expect(res.status).toBe(200);
+    } finally {
+      undo();
+    }
   });
 
   test("projects body to the minimal surface accepted by count_tokens", async () => {

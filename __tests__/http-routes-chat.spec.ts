@@ -5,6 +5,49 @@
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { handleChat, extractSessionId } from "../src/http/routes/chat.ts";
+import { __seedRegistryForTests } from "../src/domain/models.ts";
+import type { UpstreamModel } from "../src/upstream/models-client.ts";
+
+// Minimal UpstreamModel builder for registry seeding — every flag off by
+// default so a test opts in only to the capability it exercises.
+function seedModel(
+  partial: Partial<UpstreamModel> & Pick<UpstreamModel, "id" | "displayName">,
+): UpstreamModel {
+  return {
+    createdAt: null,
+    maxInputTokens: null,
+    maxOutputTokens: null,
+    adaptiveThinking: false,
+    thinkingEnabled: false,
+    contextManagement: false,
+    outputEffort: false,
+    structuredOutputs: false,
+    imageInput: false,
+    pdfInput: false,
+    citations: false,
+    codeExecution: false,
+    batch: false,
+    effortLevels: [],
+    contextManagementEdits: [],
+    ...partial,
+  };
+}
+
+// A chat body carrying a single translatable image block.
+function imageChatBody(model: string): Record<string, unknown> {
+  return {
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAA" } },
+        ],
+      },
+    ],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -146,5 +189,52 @@ describe("POST /v1/chat/completions - array message content (#6)", () => {
     }));
     // Should succeed (not throw or return 500)
     expect(res.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vision capability gate: confirmed-negative image → 400 proxy_error
+// ---------------------------------------------------------------------------
+
+describe("POST /v1/chat/completions - vision capability gate", () => {
+  test("confirmed-negative image request → 400 with type proxy_error, code 400", async () => {
+    // Live registry, model present, imageInput: false → confirmed negative.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "text-only-model", displayName: "Text Only", imageInput: false }),
+    ]);
+    try {
+      const res = await handleChat(makeRequest(imageChatBody("text-only-model")));
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { message: string; type: string; code: number } };
+      expect(body.error.type).toBe("proxy_error");
+      expect(body.error.code).toBe(400);
+      // Must NOT have reached the upstream client.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      undo();
+    }
+  });
+
+  test("unverified image request fails open → reaches upstream, 200 (no rejection)", async () => {
+    // registry === null → verified: false → gate fails open.
+    const undo = __seedRegistryForTests(null);
+    try {
+      const res = await handleChat(makeRequest(imageChatBody("claude-opus-4-6")));
+      expect(res.status).toBe(200);
+    } finally {
+      undo();
+    }
+  });
+
+  test("vision-capable model with image → 200 (forwarded)", async () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "vision-model", displayName: "Vision", imageInput: true }),
+    ]);
+    try {
+      const res = await handleChat(makeRequest(imageChatBody("vision-model")));
+      expect(res.status).toBe(200);
+    } finally {
+      undo();
+    }
   });
 });

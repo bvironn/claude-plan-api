@@ -1,10 +1,67 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn } from "bun:test";
 import {
   openaiToAnthropic,
   toAnthropicContentBlocks,
+  CapabilityMismatchError,
 } from "../src/transform/openai-to-anthropic.ts";
+import { __seedRegistryForTests } from "../src/domain/models.ts";
+import * as logger from "../src/observability/logger.ts";
+import type { UpstreamModel } from "../src/upstream/models-client.ts";
 
 type Block = Record<string, unknown>;
+
+// Minimal UpstreamModel builder for registry seeding (mirrors the helper in
+// transform-model-capabilities.spec.ts). Defaults every flag off so each test
+// opts in only to the capability it exercises.
+function seedModel(
+  partial: Partial<UpstreamModel> & Pick<UpstreamModel, "id" | "displayName">,
+): UpstreamModel {
+  return {
+    createdAt: null,
+    maxInputTokens: null,
+    maxOutputTokens: null,
+    adaptiveThinking: false,
+    thinkingEnabled: false,
+    contextManagement: false,
+    outputEffort: false,
+    structuredOutputs: false,
+    imageInput: false,
+    pdfInput: false,
+    citations: false,
+    codeExecution: false,
+    batch: false,
+    effortLevels: [],
+    contextManagementEdits: [],
+    ...partial,
+  };
+}
+
+// A user message carrying a single translatable image block.
+function imageBody(model: string): Record<string, unknown> {
+  return {
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAA" } },
+        ],
+      },
+    ],
+  };
+}
+
+// Collect only the capability-mismatch emit calls from an emit spy.
+function capabilityMismatchCalls(
+  emitSpy: ReturnType<typeof spyOn>,
+): Array<[string, string, Record<string, unknown>]> {
+  return (emitSpy.mock.calls as unknown[][]).filter(
+    (c) =>
+      c[1] === "transform.image_block_dropped" &&
+      (c[2] as Record<string, unknown>)?.reason === "capability_mismatch",
+  ) as Array<[string, string, Record<string, unknown>]>;
+}
 
 // =============================================================================
 // Phase 1 — Pure helper: toAnthropicContentBlocks
@@ -291,5 +348,187 @@ describe("openaiToAnthropic — vision e2e", () => {
       data: "CCC",
     });
     expect(lastBlock.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+  });
+});
+
+// =============================================================================
+// Phase 3 — Tri-state vision capability gate (assertImageCapability)
+// =============================================================================
+//
+// Spec: "Tri-State Vision Capability Gate" + "Confirmed-Negative Rejection
+// Contract" + "Capability-Mismatch Observability Event".
+//
+// The gate lives at one choke point inside openaiToAnthropic(), running after
+// sanitizeOpenAIMessages and before the translation loop. Tri-state:
+//   - confirmed negative (registry LIVE, model present, imageInput === false,
+//     image block present)             → throw CapabilityMismatchError + emit ERROR
+//   - vision-capable   (imageInput === true)               → forward, no throw
+//   - unverified       (registry null OR model absent)     → fail-open + emit WARN
+//   - no image block   (any registry state)                → no-op
+// -----------------------------------------------------------------------------
+
+describe("openaiToAnthropic — vision capability gate", () => {
+  test("confirmed-negative image request throws CapabilityMismatchError", () => {
+    // Live registry, model present, imageInput: false, image block present.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "text-only-model", displayName: "Text Only", imageInput: false }),
+    ]);
+    try {
+      expect(() => openaiToAnthropic(imageBody("text-only-model"))).toThrow(
+        CapabilityMismatchError,
+      );
+    } finally {
+      undo();
+    }
+  });
+
+  test("thrown CapabilityMismatchError carries the model and image_input_unsupported reason", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "text-only-model", displayName: "Text Only", imageInput: false }),
+    ]);
+    try {
+      let caught: unknown;
+      try {
+        openaiToAnthropic(imageBody("text-only-model"));
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(CapabilityMismatchError);
+      const e = caught as CapabilityMismatchError;
+      expect(e.model).toBe("text-only-model");
+      expect(e.reason).toBe("image_input_unsupported");
+      expect(e.name).toBe("CapabilityMismatchError");
+    } finally {
+      undo();
+    }
+  });
+
+  test("vision-capable model forwards the image and does NOT throw", () => {
+    // Live registry, model present, imageInput: true → pass-through.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "vision-model", displayName: "Vision", imageInput: true }),
+    ]);
+    try {
+      const { body } = openaiToAnthropic(imageBody("vision-model"));
+      const messages = body.messages as Array<Record<string, unknown>>;
+      const blocks = messages[0]!.content as Block[];
+      // The translated image block survives untouched.
+      const imageBlock = blocks.find((b) => b.type === "image");
+      expect(imageBlock).toBeDefined();
+      expect(imageBlock!.source).toEqual({
+        type: "base64",
+        media_type: "image/png",
+        data: "AAA",
+      });
+    } finally {
+      undo();
+    }
+  });
+
+  test("vision-capable model emits NO capability_mismatch event", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "vision-model", displayName: "Vision", imageInput: true }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      openaiToAnthropic(imageBody("vision-model"));
+      expect(capabilityMismatchCalls(emitSpy)).toHaveLength(0);
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  test("unverified registry (null) fails open: image forwarded, no throw", () => {
+    // registry === null → verified: false → fail open even with an image.
+    const undo = __seedRegistryForTests(null);
+    try {
+      // Use a concrete claude-* id so resolveModel passes it through verbatim
+      // and it is absent from the (null) live registry.
+      const { body } = openaiToAnthropic(imageBody("claude-opus-4-6"));
+      const messages = body.messages as Array<Record<string, unknown>>;
+      const blocks = messages[0]!.content as Block[];
+      const imageBlock = blocks.find((b) => b.type === "image");
+      expect(imageBlock).toBeDefined();
+    } finally {
+      undo();
+    }
+  });
+
+  test("model absent from a live registry fails open: no throw", () => {
+    // Live registry present but does NOT contain the resolved model id →
+    // verified: false → fail open.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Sonnet", imageInput: false }),
+    ]);
+    try {
+      // claude-opus-4-7 is absent → passthrough → not in live registry.
+      expect(() => openaiToAnthropic(imageBody("claude-opus-4-7"))).not.toThrow();
+    } finally {
+      undo();
+    }
+  });
+
+  test("text-only request is a no-op even for a confirmed image-less model", () => {
+    // No image block present → gate takes no action, no throw, regardless of
+    // the model's imageInput flag.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "text-only-model", displayName: "Text Only", imageInput: false }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      expect(() =>
+        openaiToAnthropic({
+          model: "text-only-model",
+          messages: [{ role: "user", content: "just text, no image" }],
+        }),
+      ).not.toThrow();
+      expect(capabilityMismatchCalls(emitSpy)).toHaveLength(0);
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  test("confirmed-negative rejection emits ERROR-level event with verified: true", () => {
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "text-only-model", displayName: "Text Only", imageInput: false }),
+    ]);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      try {
+        openaiToAnthropic(imageBody("text-only-model"));
+      } catch {
+        // expected throw — we assert the emitted event below
+      }
+      const calls = capabilityMismatchCalls(emitSpy);
+      expect(calls).toHaveLength(1);
+      const [level, , payload] = calls[0]!;
+      expect(level).toBe("error");
+      expect(payload.reason).toBe("capability_mismatch");
+      expect(payload.verified).toBe(true);
+      expect(payload.model).toBe("text-only-model");
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
+  });
+
+  test("fail-open forward emits WARN-level event with verified: false", () => {
+    const undo = __seedRegistryForTests(null);
+    const emitSpy = spyOn(logger, "emit");
+    try {
+      openaiToAnthropic(imageBody("claude-opus-4-6"));
+      const calls = capabilityMismatchCalls(emitSpy);
+      expect(calls).toHaveLength(1);
+      const [level, , payload] = calls[0]!;
+      expect(level).toBe("warn");
+      expect(payload.reason).toBe("capability_mismatch");
+      expect(payload.verified).toBe(false);
+      expect(payload.model).toBe("claude-opus-4-6");
+    } finally {
+      emitSpy.mockRestore();
+      undo();
+    }
   });
 });
