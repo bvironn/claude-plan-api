@@ -21,6 +21,14 @@ export interface ModelCapabilities {
   adaptiveThinking: boolean;
   contextManagement: boolean;
   outputEffort: boolean;
+  // Per-model vision support, sourced from the live registry entry
+  // (UpstreamModel.imageInput). false in the conservative default.
+  imageInput: boolean;
+  // Provenance signal: true ONLY when these capabilities were read from a
+  // LIVE registry entry (registry !== null). A static-fallback read or an
+  // absent model reports false. The vision gate uses this to fail open when
+  // capability data is unverified — it must never hard-reject on fallback data.
+  verified: boolean;
 }
 
 // --- Fallback catalog (used when the upstream is unavailable) --------------
@@ -87,6 +95,8 @@ const DEFAULT_CAPABILITIES: ModelCapabilities = {
   adaptiveThinking: false,
   contextManagement: false,
   outputEffort: false,
+  imageInput: false,
+  verified: false,
 };
 
 // --- Registry state --------------------------------------------------------
@@ -162,12 +172,20 @@ export function getCatalogSnapshot(): readonly UpstreamModel[] {
  * Sync by design so the transform pipeline stays fast.
  */
 export function getModelCapabilities(model: string): ModelCapabilities {
+  // `verified` is derived from a SINGLE read of the module-level registry so
+  // the returned object is a consistent snapshot: a concurrent refreshRegistry()
+  // swap cannot desync `imageInput` (from the entry) and `verified` (from the
+  // registry) mid-request. `live` is false when the registry has never been
+  // populated (static fallback in effect).
+  const live = registry !== null;
   const entry = indexById(currentCatalog()).get(model);
   if (!entry) return DEFAULT_CAPABILITIES;
   return {
     adaptiveThinking: entry.adaptiveThinking,
     contextManagement: entry.contextManagement,
     outputEffort: entry.outputEffort,
+    imageInput: entry.imageInput,
+    verified: live,
   };
 }
 
