@@ -15,6 +15,82 @@ import { isClaudeCodeIdentityEnabled } from "../config.ts";
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // =============================================================================
+// Vision capability gate
+// =============================================================================
+//
+// A tri-state guard that runs at a single choke point inside openaiToAnthropic()
+// (after sanitizeOpenAIMessages, before the translation loop). It rejects ONLY a
+// confirmed negative — a LIVE registry entry whose model declares imageInput:false
+// while the request carries an image block — and fails open (forward + warn) when
+// capability data is unverified (registry null or model absent). Text-only
+// requests are a no-op.
+
+/**
+ * Thrown when a request carries image content but the resolved model is
+ * CONFIRMED (via a live registry entry) not to support image input. Carries the
+ * resolved model id and a stable `reason` so route handlers can map it to a
+ * structured 400 proxy_error response. Co-located with the transform to mirror
+ * the codebase precedent (CountTokensError lives with countTokens) — the 3 route
+ * handlers already import from this module, so no new dependency edge is added.
+ */
+export class CapabilityMismatchError extends Error {
+  constructor(
+    readonly model: string,
+    readonly reason = "image_input_unsupported",
+  ) {
+    super(`Model ${model} does not support image input`);
+    this.name = "CapabilityMismatchError";
+  }
+}
+
+// Content-block `type` values that represent image input across the OpenAI
+// chat dialect (`image_url`), the Responses API (`input_image`), and the
+// already-native Anthropic shape (`image`).
+const IMAGE_TYPES = new Set(["image_url", "input_image", "image"]);
+
+/**
+ * Detect whether any message's array content contains an image block.
+ * String-content messages never carry images, so they are skipped.
+ */
+function messagesContainImage(
+  messages: Array<Record<string, unknown>>,
+): boolean {
+  return messages.some(
+    (m) =>
+      Array.isArray(m.content) &&
+      (m.content as Array<Record<string, unknown>>).some((b) =>
+        IMAGE_TYPES.has(b.type as string),
+      ),
+  );
+}
+
+/**
+ * Tri-state vision capability gate. See the block comment above for the
+ * contract. Emits `transform.image_block_dropped` with reason
+ * `capability_mismatch` whenever it acts:
+ *   - confirmed negative → emit at ERROR level (verified:true) and throw
+ *   - unverified forward  → emit at WARN level (verified:false), no throw
+ * A text-only request or a vision-capable model returns silently.
+ */
+function assertImageCapability(
+  model: string,
+  messages: Array<Record<string, unknown>>,
+): void {
+  if (!messagesContainImage(messages)) return; // fast path: no image, no gate
+  const { imageInput, verified } = getModelCapabilities(model);
+  if (imageInput) return; // vision-capable → pass through
+
+  emit(verified ? "error" : "warn", "transform.image_block_dropped", {
+    reason: "capability_mismatch",
+    urlPrefix: "",
+    model,
+    verified,
+  });
+
+  if (verified) throw new CapabilityMismatchError(model); // confirmed negative
+}
+
+// =============================================================================
 // Vision block translation (OpenAI / Responses API → Anthropic-native)
 // =============================================================================
 //
@@ -376,6 +452,17 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
   // emit them on regenerate/cancel paths. See sanitizeOpenAIMessages docs.
   const rawMessages = (body.messages as Array<Record<string, unknown>>) || [];
   const sanitizedMessages = sanitizeOpenAIMessages(rawMessages);
+
+  // Vision capability gate — single choke point for all three transform routes.
+  // Rejects only a confirmed-negative image request (live registry says the
+  // model has no vision support); fails open when capability data is unverified.
+  // Runs before the translation loop so no image is forwarded on a hard reject.
+  //
+  // MAINTAINER NOTE: this is the ONLY place assertImageCapability() can throw
+  // CapabilityMismatchError. All three route handlers (chat/completions/tokens)
+  // wrap THIS call in try/catch and map that error to a 400 proxy_error. If you
+  // relocate this guard, update those catch blocks or callers will 500.
+  assertImageCapability(model, sanitizedMessages);
 
   for (const msg of sanitizedMessages) {
     // OpenAI's `developer` role (o1+ models) is the system-level instruction

@@ -217,24 +217,78 @@ describe("openaiToAnthropic — model capability gating", () => {
 
   // --- REQ-6: getModelCapabilities reads from the registry ---
   test("REQ-7: getModelCapabilities returns registry entry and default for unknown", () => {
-    // Known capable entry from the seed
+    // Known capable entry from the seed (registry is live → verified: true).
     expect(getModelCapabilities("claude-sonnet-4-6")).toEqual({
       adaptiveThinking: true,
       contextManagement: true,
       outputEffort: true,
+      imageInput: true,
+      verified: true,
     });
-    // Known legacy entry from the seed (mirrors upstream: ctx-mgmt true, no adaptive/effort)
+    // Known legacy entry from the seed (mirrors upstream: ctx-mgmt true, no adaptive/effort).
+    // Seed leaves imageInput at its default (false); registry is live → verified: true.
     expect(getModelCapabilities("claude-sonnet-4-5-20250929")).toEqual({
       adaptiveThinking: false,
       contextManagement: true,
       outputEffort: false,
+      imageInput: false,
+      verified: true,
     });
-    // Unknown model → safe default
+    // Unknown model → safe default (no entry → verified: false, imageInput: false)
     expect(getModelCapabilities("totally-unknown-model-9000")).toEqual({
       adaptiveThinking: false,
       contextManagement: false,
       outputEffort: false,
+      imageInput: false,
+      verified: false,
     });
+  });
+
+  // --- REQ-Model Capability Surface: imageInput + verified provenance ---
+  //
+  // The vision gate needs two new fields on ModelCapabilities:
+  //   imageInput — the live registry's per-model vision flag
+  //   verified   — true ONLY when the value came from a LIVE registry entry
+  //                (registry !== null). A static-fallback read or an absent
+  //                model reports verified: false so the gate fails open.
+  test("REQ-9: live registry read surfaces imageInput and verified: true", () => {
+    // claude-opus-4-6 in the seed declares imageInput: true; registry is live.
+    expect(getModelCapabilities("claude-opus-4-6")).toEqual({
+      adaptiveThinking: true,
+      contextManagement: true,
+      outputEffort: true,
+      imageInput: true,
+      verified: true,
+    });
+  });
+
+  test("REQ-10: static-fallback read (registry === null) reports verified: false, imageInput: false", () => {
+    // Force fallback mode: no live registry. getModelCapabilities then reads
+    // from FALLBACK_MODELS, where makeFallback() sets imageInput: false. Even
+    // though the model exists in the fallback catalog, verified MUST be false
+    // because the data is NOT from a live registry.
+    const undo = __seedRegistryForTests(null);
+    try {
+      const caps = getModelCapabilities("claude-sonnet-4-6");
+      expect(caps.verified).toBe(false);
+      expect(caps.imageInput).toBe(false);
+    } finally {
+      undo();
+    }
+  });
+
+  test("REQ-11: model absent from a live registry reports verified: false, imageInput: false", () => {
+    // Live registry that lacks the requested id → DEFAULT_CAPABILITIES.
+    const undo = __seedRegistryForTests([
+      seedModel({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6", imageInput: true }),
+    ]);
+    try {
+      const caps = getModelCapabilities("model-not-in-registry");
+      expect(caps.verified).toBe(false);
+      expect(caps.imageInput).toBe(false);
+    } finally {
+      undo();
+    }
   });
 
   // --- REQ-7: Regression test for the exact production 400 ---

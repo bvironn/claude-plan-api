@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { handleCompletions } from "../src/http/routes/completions.ts";
+import * as transform from "../src/transform/openai-to-anthropic.ts";
+import { CapabilityMismatchError } from "../src/transform/openai-to-anthropic.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -388,6 +390,50 @@ describe("POST /v1/completions — unsupported parameters", () => {
 
     // The Anthropic body must not carry best_of at any level
     expect("best_of" in sent).toBe(false);
+  });
+});
+
+describe("POST /v1/completions — vision capability gate", () => {
+  // FIM requests build string-content messages, so an image can never
+  // naturally reach the gate on this route — the catch is inert for real FIM
+  // traffic. To prove the route MAPS a CapabilityMismatchError to a 400
+  // proxy_error (identical to chat/tokens), we force the transform to throw.
+  test("CapabilityMismatchError from the transform → 400 with type proxy_error, code 400", async () => {
+    const transformSpy = spyOn(transform, "openaiToAnthropic").mockImplementation(
+      () => {
+        throw new CapabilityMismatchError("text-only-model");
+      },
+    );
+    try {
+      const res = await handleCompletions(postJSON({
+        model: "text-only-model",
+        prompt: "def add(",
+      }));
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: { message: string; type: string; code: number } };
+      expect(body.error.type).toBe("proxy_error");
+      expect(body.error.code).toBe(400);
+      // Must NOT have reached the upstream client.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      transformSpy.mockRestore();
+    }
+  });
+
+  test("non-CapabilityMismatchError from the transform is re-thrown (not mapped to 400)", async () => {
+    const boom = new Error("unexpected transform failure");
+    const transformSpy = spyOn(transform, "openaiToAnthropic").mockImplementation(
+      () => {
+        throw boom;
+      },
+    );
+    try {
+      await expect(
+        handleCompletions(postJSON({ model: "claude-sonnet-4-6", prompt: "x" })),
+      ).rejects.toThrow("unexpected transform failure");
+    } finally {
+      transformSpy.mockRestore();
+    }
   });
 });
 
