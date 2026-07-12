@@ -159,6 +159,23 @@ describe("storage — getUsageByApiKey aggregation", () => {
     const usage = getUsageByApiKey({ timeFrom: "2030-01-01T00:00:00Z", timeTo: "2030-12-31T00:00:00Z" });
     expect(usage).toEqual([]);
   });
+
+  it("excludes zero-token admin rows (e.g. GET /api/keys) from both the request count and token sums", () => {
+    // A real chat completion for key 1 — has token counts, must be counted.
+    insertRequest({ trace_id: "chat-1", timestamp: "2026-03-15T00:00:00Z", api_key_id: 1, input_tokens: 40, output_tokens: 4 });
+    // An admin call (e.g. GET /api/keys) attributed to the same key but never
+    // reaching an upstream model call — input_tokens stays NULL. Must NOT
+    // inflate the "requests" count shown on the dashboard.
+    insertRequest({ trace_id: "admin-1", timestamp: "2026-03-16T00:00:00Z", api_key_id: 1 });
+
+    const usage = getUsageByApiKey(MARCH);
+    const k1 = usage.find((u) => u.api_key_id === 1)!;
+
+    // Only the token-bearing chat row counts, plus the two seeded in-window
+    // rows (r1, r2) from the outer beforeEach → 3, not 4.
+    expect(k1.requests).toBe(3);
+    expect(k1.tokens_in).toBe(340); // 100 + 200 + 40, admin row contributes 0
+  });
 });
 
 // ---------------------------------------------------------------------------

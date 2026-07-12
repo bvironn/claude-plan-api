@@ -865,13 +865,24 @@ export function resolveUsageTimeFrom(timeFrom?: string): string {
  * storage layer enforces `DEFAULT_USAGE_WINDOW_MS` so aggregation never scans
  * the full history. Mirrors the `getMetrics()` `SUM(...)` idiom; returns `[]`
  * (not an error) when nothing matches.
+ *
+ * The `requests` table is a FULL audit log: `withObservability` inserts a row
+ * for EVERY call to a gated route, including zero-token admin traffic like
+ * `GET/POST /api/keys` (list, create, rename, revoke, rotate) — those rows
+ * never reach an upstream model call, so `input_tokens` stays SQL NULL. This
+ * aggregate deliberately narrows to `r.input_tokens IS NOT NULL` (only rows
+ * that actually recorded token usage — currently `/v1/chat/completions` and
+ * `/v1/completions`) so the dashboard's "requests" count and token sums
+ * reflect real inference cost, not dashboard/admin traffic. This condition is
+ * path-agnostic: it automatically covers any future token-consuming endpoint
+ * without a hardcoded route allowlist.
  */
 export function getUsageByApiKey(filters: UsageFilters = {}): UsageByKey[] {
   if (!db) return [];
   // Chokepoint: an absent lower bound defaults to a bounded lookback window
   // rather than the full `requests` history.
   const timeFrom = resolveUsageTimeFrom(filters.timeFrom);
-  const conds: string[] = ["r.api_key_id IS NOT NULL", "r.timestamp >= ?"];
+  const conds: string[] = ["r.api_key_id IS NOT NULL", "r.input_tokens IS NOT NULL", "r.timestamp >= ?"];
   const vals: SQLQueryBindings[] = [timeFrom];
   if (filters.timeTo) { conds.push("r.timestamp <= ?"); vals.push(filters.timeTo); }
   const where = `WHERE ${conds.join(" AND ")}`;
