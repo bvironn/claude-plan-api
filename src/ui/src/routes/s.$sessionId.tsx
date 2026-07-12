@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
@@ -11,8 +11,17 @@ import { useMemo, useState } from "react"
 
 import { getRequest } from "@/lib/api"
 import { groupIntoConversations } from "@/lib/sessions"
-import { sessionGroupingQueryOptions } from "@/lib/session-query"
-import { computeExpandedTurns, toggleTurnInteraction } from "@/lib/session-turns"
+import {
+  sessionGroupingQueryOptions,
+  SESSION_GROUPING_REFETCH_INTERVAL_MS,
+} from "@/lib/session-query"
+import {
+  computeExpandedTurns,
+  computeMessageDedup,
+  toggleTurnInteraction,
+  turnStaleTime,
+  type TurnDedup,
+} from "@/lib/session-turns"
 import { formatDuration, formatRelativeTime, formatTokens, truncate } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
@@ -53,6 +62,8 @@ function SessionDetailPage() {
   // per-turn transcripts fetched on demand via `getRequest` below.
   const groupQuery = useQuery(sessionGroupingQueryOptions())
 
+  const queryClient = useQueryClient()
+
   const conversation = useMemo(() => {
     if (!groupQuery.data) return null
     const groups = groupIntoConversations(groupQuery.data.requests)
@@ -62,15 +73,39 @@ function SessionDetailPage() {
   // Fetch every turn of the conversation in parallel. Each turn's transcript
   // is a separate API call. Using useQueries would be cleaner, but enabled
   // with a stable array gives us the same effect with less code.
+  //
+  // Each turn body is cached under its own `["session-turn", id]` entry via
+  // `ensureQueryData`, with a per-turn `staleTime`: the last (still-growing)
+  // turn stays live (`0` → re-fetched on each poll) while every prior turn is
+  // immutable (`Infinity` → served from cache, never re-fetched). Note:
+  // `staleTime` alone never triggers a background refetch for an already-cached
+  // `ensureQueryData` entry — `revalidateIfStale: true` is required for that.
+  // The outer `refetchInterval` is what drives that per-poll re-run (spec:
+  // Immutable-Turn Fetch Caching + Live Last-Turn Updates).
   const turnsQuery = useQuery({
     queryKey: ["session-turns", sessionId, conversation?.traceIds],
     enabled: !!conversation,
+    refetchInterval: SESSION_GROUPING_REFETCH_INTERVAL_MS,
     queryFn: async () => {
       if (!conversation) return []
-      const results = await Promise.all(
-        conversation.traceIds.map((id) => getRequest(id).catch(() => null)),
+      const settled = await Promise.all(
+        conversation.traceIds.map((id, i, arr) =>
+          queryClient
+            .ensureQueryData({
+              queryKey: ["session-turn", id],
+              queryFn: () => getRequest(id),
+              staleTime: turnStaleTime(i, arr.length),
+              revalidateIfStale: true,
+            })
+            .then((data) => ({ id, data, failed: false as const }))
+            .catch(() => ({ id, data: null, failed: true as const })),
+        ),
       )
-      return results.filter((r): r is NonNullable<typeof r> => r !== null)
+      const failedTraceIds = settled.filter((s) => s.failed).map((s) => s.id)
+      const results = settled
+        .map((s) => s.data)
+        .filter((r): r is NonNullable<typeof r> => r !== null)
+      return { results, failedTraceIds }
     },
   })
 
@@ -80,14 +115,24 @@ function SessionDetailPage() {
   // always expanded (derived, never stored).
   const [userInteracted, setUserInteracted] = useState<Set<string>>(new Set())
 
+  const turns = turnsQuery.data?.results
+  const failedTurnCount = turnsQuery.data?.failedTraceIds.length ?? 0
+
   const turnIds = useMemo(
-    () => turnsQuery.data?.map((t) => t.request.traceId) ?? [],
-    [turnsQuery.data],
+    () => turns?.map((t) => t.request.traceId) ?? [],
+    [turns],
   )
 
   const expandedTurns = useMemo(
     () => computeExpandedTurns(turnIds, userInteracted),
     [turnIds, userInteracted],
+  )
+
+  // Per-turn render-dedup verdicts, keyed by traceId. Recomputed whenever the
+  // turn bodies change (the last turn can grow on each poll).
+  const dedupMap = useMemo(
+    () => computeMessageDedup(turns?.map((t) => t.request) ?? []),
+    [turns],
   )
 
   const handleToggle = (traceId: string) => {
@@ -143,22 +188,33 @@ function SessionDetailPage() {
               <Skeleton className="h-32 w-full" />
             </div>
           ) : (
-            <div className="flex flex-col gap-6">
-              {turnsQuery.data?.map((turn, i) => {
-                const total = turnsQuery.data?.length ?? 0
-                return (
-                  <TurnSection
-                    key={turn.request.traceId}
-                    index={i}
-                    total={total}
-                    request={turn.request}
-                    isLast={i === total - 1}
-                    isExpanded={expandedTurns.has(turn.request.traceId)}
-                    onToggle={() => handleToggle(turn.request.traceId)}
-                  />
-                )
-              })}
-            </div>
+            <>
+              {failedTurnCount > 0 && (
+                <Alert variant="destructive">
+                  <AlertCircleIcon />
+                  <AlertTitle>
+                    {failedTurnCount} turn{failedTurnCount === 1 ? "" : "s"} failed to load
+                  </AlertTitle>
+                </Alert>
+              )}
+              <div className="flex flex-col gap-6">
+                {turns?.map((turn, i) => {
+                  const total = turns?.length ?? 0
+                  return (
+                    <TurnSection
+                      key={turn.request.traceId}
+                      index={i}
+                      total={total}
+                      request={turn.request}
+                      isLast={i === total - 1}
+                      isExpanded={expandedTurns.has(turn.request.traceId)}
+                      onToggle={() => handleToggle(turn.request.traceId)}
+                      dedup={dedupMap.get(turn.request.traceId)}
+                    />
+                  )
+                })}
+              </div>
+            </>
           )}
         </>
       )}
@@ -213,6 +269,7 @@ function TurnSection({
   isLast,
   isExpanded,
   onToggle,
+  dedup,
 }: {
   index: number
   total: number
@@ -220,6 +277,7 @@ function TurnSection({
   isLast: boolean
   isExpanded: boolean
   onToggle: () => void
+  dedup?: TurnDedup
 }) {
   // Turn identity summary — badge, status, and meta. For prior (collapsible)
   // turns this becomes the Collapsible trigger button and gains a chevron.
@@ -273,7 +331,7 @@ function TurnSection({
           {summary}
           {controls}
         </div>
-        <TranscriptView record={request} />
+        <TranscriptView record={request} dedup={dedup} />
       </section>
     )
   }
@@ -290,7 +348,7 @@ function TurnSection({
           {controls}
         </div>
         <CollapsibleContent>
-          <TranscriptView record={request} />
+          <TranscriptView record={request} dedup={dedup} />
         </CollapsibleContent>
       </section>
     </Collapsible>

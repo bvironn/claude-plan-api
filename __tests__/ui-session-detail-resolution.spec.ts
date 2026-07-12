@@ -112,9 +112,25 @@ describe("s.$sessionId.tsx route wiring", () => {
     expect(source).toContain("sessionGroupingQueryOptions")
   })
 
-  test("no longer polls the grouping query with a refetchInterval", async () => {
+  // The grouping query must stay poll-free AT THE ROUTE LEVEL: its polling
+  // contract lives centrally in `sessionGroupingQueryOptions()` (tested above),
+  // so the route consumes it as-is and never wraps it with a hardcoded heavy
+  // `refetchInterval` that could reintroduce the 10s 500-row full-body poll
+  // (finding #3). The session-transcript-dedup change (spec: Live Last-Turn
+  // Updates) adds ONE route-level `refetchInterval` — on `turnsQuery`, bound to
+  // the shared SESSION_GROUPING_REFETCH_INTERVAL_MS constant so the last turn
+  // keeps updating; that is the per-turn by-id poll, not a full-body list poll.
+  test("keeps the grouping query poll-free at the route level (only turnsQuery polls, via the shared interval)", async () => {
     const source = await Bun.file(routePath).text()
-    expect(source).not.toContain("refetchInterval")
+    // Grouping query is consumed straight from the shared poll-free resolver.
+    expect(source).toContain("useQuery(sessionGroupingQueryOptions())")
+    // Every route-level refetchInterval is the turns liveness poll bound to the
+    // shared constant — never a hardcoded numeric interval on the grouping query.
+    const intervals = source.match(/refetchInterval:[^,\n]*/g) ?? []
+    expect(intervals.length).toBeGreaterThan(0)
+    for (const interval of intervals) {
+      expect(interval).toContain("SESSION_GROUPING_REFETCH_INTERVAL_MS")
+    }
   })
 
   test("still fetches each turn on demand via the by-id endpoint", async () => {
