@@ -1,0 +1,10 @@
+[Unit]
+Description=claude-plan-api: poll origin/master every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+Unit=claude-plan-api-deploy.service
+
+[Install]
+WantedBy=timers.target

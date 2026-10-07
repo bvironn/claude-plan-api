@@ -1,0 +1,9 @@
+[Unit]
+Description=claude-plan-api: deploy origin/master if it moved
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/claude-plan-api/deploy/auto-deploy.sh
+TimeoutStartSec=15min
