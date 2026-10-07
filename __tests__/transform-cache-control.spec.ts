@@ -66,10 +66,10 @@ describe("openaiToAnthropic — cache_control breakpoints (last user block + las
 
   // --- REQ Last-User / mixed [tool_result, text] ---
   test("last user mixes tool_result + text → only the FINAL block carries cache_control", () => {
-    // Use a paired assistant tool_use → user tool_result so repairToolPairs
-    // does not strip the tool_result as an orphan, then append a user text
-    // turn whose content is a mixed array. The LAST user message ends with
-    // a text block preceded by a tool_result block.
+    // The user turn right after the assistant tool_use answers it with a
+    // mixed array (tool_result + text). Being adjacent, the tool_result
+    // survives tool-pair repair. The LAST user message ends with a text
+    // block preceded by a tool_result block.
     const { body } = openaiToAnthropic({
       model: "sonnet",
       messages: [
@@ -81,11 +81,10 @@ describe("openaiToAnthropic — cache_control breakpoints (last user block + las
             { id: "call_mix", function: { name: "inspector", arguments: "{}" } },
           ],
         },
-        { role: "tool", tool_call_id: "call_mix", content: "inspector data" },
         {
           role: "user",
           content: [
-            { type: "tool_result", tool_use_id: "call_mix", content: "bonus" },
+            { type: "tool_result", tool_use_id: "call_mix", content: "inspector data" },
             { type: "text", text: "please continue" },
           ],
         },
