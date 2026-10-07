@@ -262,7 +262,12 @@ Strict TDD for behavioural changes (see [`CLAUDE.md`](./CLAUDE.md)); `bun test` 
 | --- | --- | --- | --- |
 | `PORT` | integer | `3456` | Listen port; the first CLI arg overrides this. |
 | `BIND_HOST` | string | `127.0.0.1` | Loopback by default. Set to `0.0.0.0` or a specific IP only if you knowingly want LAN or public exposure — remember the gateway authenticates to Anthropic with **your** OAuth token. |
-| `CREDENTIALS_PATH` | path | `~/.claude/.credentials.json` | OAuth credentials source. |
+| `CREDENTIALS_PATH` | path | `$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json` | OAuth credentials source. Shared with the `claude` CLI: tokens rotated by anyone else are adopted, and refreshed tokens are written back only if the file still holds the token that was refreshed. |
+| `CLAUDE_CONFIG_DIR` | path | — | Honoured like the CLI does when `CREDENTIALS_PATH` is unset. |
+| `REFRESH_WAIT_MS` | integer (ms) | `45000` | How long a request waits through a rate-limited token refresh (for the cooldown to clear or another writer to store a fresh token) before answering `429` with `retry-after`. A dead refresh token answers `503` immediately. |
+| `REFRESH_COOLDOWN_MS` | integer (ms) | `15000` | Base cooldown after a rate-limited token refresh; doubles per consecutive failure (jittered, max 60s). |
+| `REFRESH_LOCK_DIR` | path | `~/.local/share/claude-plan-api` | Directory of the cross-process refresh lock, so several gateway processes sharing one credentials file never refresh concurrently. |
+| `REFRESH_LOCK_TTL_MS` | integer (ms) | `20000` | Age after which a refresh lock left by a crashed process is taken over. |
 | `ANTHROPIC_CLI_VERSION` | string | `2.1.280` | CLI version reported in user-agent and billing header. MUST match an Anthropic-recognised Claude Code release; unrecognised versions trigger safety policies (including redacted thinking), and newer models require a minimum version (Opus 5.5 needs ≥ 2.1.280). |
 | `MAX_RETRY_AFTER_MS` | integer (ms) | `30000` | Upper bound on honoured upstream `retry-after`. Anthropic returns hour-scale values when a Max quota is exhausted; this cap prevents the proxy from hanging indefinitely. |
 | `TOOL_REPAIR_MODE` | `placeholder` \| `drop` | `placeholder` | How unpaired tool calls are reconciled before dispatch (pairs must be adjacent). `placeholder` keeps every assistant turn intact and answers a stranded `tool_use` with a synthetic `is_error` result; `drop` deletes orphaned blocks (omitting whole turns that carry thinking blocks). |

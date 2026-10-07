@@ -8,7 +8,16 @@ export const PORT = parseInt(process.argv[2] || Bun.env.PORT || "3456", 10);
 // any reachable client consume the operator's subscription. Opt into LAN or
 // public exposure explicitly with `BIND_HOST=0.0.0.0` (or a specific IP).
 export const BIND_HOST = Bun.env.BIND_HOST ?? "127.0.0.1";
-export const CREDENTIALS_PATH = Bun.env.CREDENTIALS_PATH || join(homedir(), ".claude", ".credentials.json");
+/**
+ * Path of the Claude Code `.credentials.json` this gateway serves from.
+ * Precedence: CREDENTIALS_PATH, then `$CLAUDE_CONFIG_DIR/.credentials.json`
+ * (the CLI's own config-dir override), then `~/.claude/.credentials.json`.
+ * Read at CALL TIME so tests can point it at a fixture.
+ */
+export function getCredentialsPath(): string {
+  if (Bun.env.CREDENTIALS_PATH) return Bun.env.CREDENTIALS_PATH;
+  return join(Bun.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), ".credentials.json");
+}
 export const ANTHROPIC_API = "https://api.anthropic.com/v1/messages?beta=true";
 export const REFRESH_URL = "https://claude.ai/v1/oauth/token";
 export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";

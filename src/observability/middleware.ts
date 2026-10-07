@@ -103,8 +103,11 @@ export function withObservability(
           stack: (err as Error).stack,
           duration,
         }, "http");
+        // Errors that carry their own HTTP status (e.g. credentials
+        // unavailable → 429/503) are recorded with it, not a blanket 500.
+        const status = (err as { status?: unknown }).status;
         updateRequest(traceId, {
-          status: 500,
+          status: typeof status === "number" ? status : 500,
           duration_ms: duration,
           error: (err as Error).message,
         });

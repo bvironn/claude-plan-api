@@ -189,7 +189,7 @@ export async function handleCompletions(req: Request): Promise<Response> {
   const model = (body.model as string) || "claude-sonnet-4-6";
   const isStream = body.stream === true;
 
-  await ensureValidToken();
+  await ensureValidToken({ wait: true, signal: req.signal });
   await ensureAccountUuid();
 
   // Build the synthesized chat body that openaiToAnthropic expects
@@ -232,6 +232,7 @@ export async function handleCompletions(req: Request): Promise<Response> {
     model: resolvedModel,
     isStream,
     isStructuredOutput,
+    signal: req.signal,
   });
 
   if (!res.ok) {

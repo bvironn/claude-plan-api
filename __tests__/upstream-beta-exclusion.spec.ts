@@ -1,10 +1,15 @@
 import { describe, test, expect, spyOn, beforeEach, afterEach, mock } from "bun:test";
 
 // Mock credentials BEFORE importing modules that transitively reach it.
-// buildHeaders calls getCredentials() eagerly; anthropic-client calls refreshToken + getCredentials.
+// buildHeaders calls getCredentials() eagerly; anthropic-client recovers 401s
+// via reloadCredentialsFromSource + forceRefresh.
 mock.module("../src/domain/credentials.ts", () => ({
   getCredentials: () => ({ accessToken: "test-token", refreshToken: "rt", expiresAt: Date.now() + 60_000 }),
   refreshToken: async () => {},
+  reloadCredentialsFromSource: () => null,
+  forceRefresh: async () => null,
+  ensureValidToken: async () => {},
+  CredentialsUnavailableError: class extends Error {},
 }));
 
 import {
