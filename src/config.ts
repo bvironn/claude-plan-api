@@ -15,14 +15,14 @@ export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 // Claude CLI version reported in user-agent, billing header, and billing
 // hash signature. MUST match a version Anthropic recognises as an official
 // Claude Code release — unrecognised versions trigger safety policies
-// (including redacted thinking). The reference plugin `opencode-claude-auth`
-// bumped to "2.1.112" (see PR #207) which observes the real Claude Code
-// 2.1.112 request shape; we follow because Anthropic may stop recognising
-// the older 2.1.90 fingerprint over time.
+// (including redacted thinking), and models gate on a minimum version:
+// Opus 5.5 rejects anything older than 2.1.280 with "Claude Code X does not
+// support this model". Tracks the reference plugin `opencode-claude-auth`
+// (v2.2.1, PR #285), whose betas were captured from Claude CLI 2.1.257.
 //
 // Override with env var if you need to track a different accepted version:
-//   ANTHROPIC_CLI_VERSION=2.1.95
-export const VERSION = Bun.env.ANTHROPIC_CLI_VERSION ?? "2.1.112";
+//   ANTHROPIC_CLI_VERSION=2.1.280
+export const VERSION = Bun.env.ANTHROPIC_CLI_VERSION ?? "2.1.280";
 export const SALT = "59cf53e54c78";
 export const MAX_RETRIES = 3;
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
