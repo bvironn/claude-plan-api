@@ -5,40 +5,56 @@ import { VERSION } from "../config.ts";
 /**
  * Build the `anthropic-beta` header value for upstream requests.
  *
- * Design: the beta set is aligned with the `opencode-claude-auth` plugin
- * (the reference implementation that is known to stream thinking
- * plaintext successfully against OAuth-authenticated Claude plans).
+ * The beta set mirrors the reference plugin `opencode-claude-auth` v2.2.1,
+ * whose config is regenerated from live Claude CLI 2.1.257 traffic
+ * (upstream PR #279). Anthropic fingerprints OAuth requests against what the
+ * real CLI sends, so drifting from it risks safety policies (redacted
+ * thinking, misleading "out of extra usage" 400s).
  *
- * CRITICAL OMISSIONS — these are NOT in the set and for a reason:
+ * Per-model rules (upstream `modelOverrides`, first match wins):
+ *   - haiku           → never receives `effort-2025-11-24`
+ *   - opus-4-5 / 4-6 / 4-7 → add `effort-2025-11-24`
+ *   - everything else (sonnet-4-5, opus-4-8, 5.x, fable) → base set only
  *
- * - `redact-thinking-2026-02-12` → would force Anthropic to emit empty
- *   thinking shells + signed ciphertext only. The official Claude CLI
- *   enables it for privacy. This gateway is an AUDIT proxy where the
- *   operator wants to read the chain-of-thought; omitting the beta
- *   unlocks real `thinking_delta` streaming.
- * - `advisor-tool-2026-03-01` and `advanced-tool-use-2025-11-20` → these
- *   also correlate with redacted-thinking behaviour in observation.
- *   Keeping the beta set tight matches the plugin's proven shape.
- *
- * `interleaved-thinking-2025-05-14` STAYS for adaptive-thinking models so
- * thinking blocks can interleave with tool_use in a single response
- * (required for agent flows). Haiku excludes it (does not support
- * adaptive thinking).
- *
- * `effort-2025-11-24` is per-model: only attached to opus/sonnet 4.6+
- * and 4.7+ where the effort parameter is supported.
+ * `context-1m-2025-08-07` is NEVER sent: the API grants 1M context natively
+ * and the beta only triggers "Extra usage is required" on plans without
+ * long-context billing (upstream v2.0.0, PR #240).
  */
 
-// Models where the `effort-2025-11-24` beta is required.
-const EFFORT_MODEL_PATTERNS = ["4-6", "4-7"] as const;
+export const BASE_BETAS: readonly string[] = [
+  "claude-code-20250219",
+  "oauth-2025-04-20",
+  "interleaved-thinking-2025-05-14",
+  "prompt-caching-scope-2026-01-05",
+  "context-management-2025-06-27",
+  "advisor-tool-2026-03-01",
+  "thinking-token-count-2026-05-13",
+  "extended-cache-ttl-2025-04-11",
+];
 
-// Models that must NOT receive `interleaved-thinking-2025-05-14` (they
-// don't support adaptive thinking — Anthropic rejects the beta).
-const NO_INTERLEAVED_PATTERNS = ["haiku"] as const;
+export const EFFORT_BETA = "effort-2025-11-24";
+export const STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-12-15";
 
-function modelMatches(model: string, patterns: readonly string[]): boolean {
+interface ModelOverride {
+  exclude?: readonly string[];
+  add?: readonly string[];
+}
+
+// Ordered: first substring match wins. Keep "haiku" ahead of any version
+// pattern so claude-haiku-4-5 never receives effort.
+const MODEL_OVERRIDES: ReadonlyArray<[pattern: string, override: ModelOverride]> = [
+  ["haiku", { exclude: [EFFORT_BETA] }],
+  ["opus-4-5", { add: [EFFORT_BETA] }],
+  ["4-6", { add: [EFFORT_BETA] }],
+  ["4-7", { add: [EFFORT_BETA] }],
+];
+
+function getModelOverride(model: string): ModelOverride | null {
   const m = model.toLowerCase();
-  return patterns.some((p) => m.includes(p));
+  for (const [pattern, override] of MODEL_OVERRIDES) {
+    if (m.includes(pattern)) return override;
+  }
+  return null;
 }
 
 export function buildBetas(
@@ -46,77 +62,20 @@ export function buildBetas(
   isStructuredOutput = false,
   excluded?: Set<string>,
 ): string {
-  const modelSupportsEffort = modelMatches(model, EFFORT_MODEL_PATTERNS);
-  const modelSupportsInterleavedThinking = !modelMatches(model, NO_INTERLEAVED_PATTERNS);
+  let parts = [...BASE_BETAS];
 
-  if (isStructuredOutput) {
-    // Structured-output path: same base set plus the structured-outputs beta.
-    // No effort beta (structured-outputs suppresses thinking + effort anyway).
-    const parts: string[] = [
-      "oauth-2025-04-20",
-      "context-management-2025-06-27",
-      "prompt-caching-scope-2026-01-05",
-      "structured-outputs-2025-12-15",
-    ];
-    if (modelSupportsInterleavedThinking) {
-      parts.splice(1, 0, "interleaved-thinking-2025-05-14");
-    }
-    return filterExcluded(parts, excluded).join(",");
+  const override = getModelOverride(model);
+  if (override?.exclude) {
+    const exclude = override.exclude;
+    parts = parts.filter((b) => !exclude.includes(b));
+  }
+  if (override?.add) {
+    for (const b of override.add) if (!parts.includes(b)) parts.push(b);
   }
 
-  // Base chat path — aligned with the REAL opencode-claude-auth + OpenCode
-  // outbound request (captured byte-for-byte in
-  // `scripts/bare-thinking-test.ts` validation). The code of the plugin
-  // in isolation lists only 5 of these, but OpenCode's anthropic SDK
-  // merges in `structured-outputs-2025-11-13` and
-  // `fine-grained-tool-streaming-2025-05-14` on every request. Both
-  // correlate with the plaintext-thinking codepath on OAuth accounts;
-  // omitting them is one of the reasons we were getting redacted
-  // thinking. Order here mirrors the plugin's post-merge output.
-  const parts: string[] = [
-    "claude-code-20250219",
-    "oauth-2025-04-20",
-    "prompt-caching-scope-2026-01-05",
-    "context-management-2025-06-27",
-  ];
-  if (modelSupportsInterleavedThinking) {
-    parts.splice(2, 0, "interleaved-thinking-2025-05-14");
-  }
-  if (modelSupportsEffort) {
-    parts.push("effort-2025-11-24");
-  }
-  // Append betas injected by OpenCode's anthropic SDK; kept after the
-  // effort beta to preserve plugin order verbatim.
-  parts.push("structured-outputs-2025-11-13");
-  parts.push("fine-grained-tool-streaming-2025-05-14");
-
-  // Long-context beta `context-1m-2025-08-07`.
-  //
-  // Anthropic /v1/models (verified live with the OAuth token) declares
-  // FIVE models with `max_input_tokens: 1_000_000`:
-  //   claude-opus-4-6                 (128k output)
-  //   claude-opus-4-7                 (128k output)
-  //   claude-sonnet-4-6               (128k output)
-  //   claude-sonnet-4-5-20250929      (64k output)
-  //   claude-sonnet-4-20250514        (64k output)
-  //
-  // Of those, only `claude-opus-4-6` empirically requires the beta to
-  // unlock its 1M window on OAuth accounts (pre-existing observation;
-  // see commit eb125a9 "auto-exclude long-context betas on 400 errors
-  // from Pro accounts" — opus-4-6 is the model that triggered the
-  // defensive retry path). The other four 1M models grant the full
-  // window natively from the model id alone, so we do NOT pre-attach
-  // the beta — the request fingerprint stays minimal AND the retry
-  // loop in `anthropic-client.ts` (which uses `addExcludedBeta` to drop
-  // betas on long-context rejections) still works for opus-4-6 as the
-  // graceful 200k fallback.
-  //
-  // The remaining catalog ids (haiku-4-5, opus-4-1, opus-4, opus-4-5)
-  // declare `max_input_tokens: 200_000` — there is nothing to opt into.
-  if (model === "claude-opus-4-6") {
-    const idx = parts.indexOf("oauth-2025-04-20");
-    parts.splice(idx + 1, 0, "context-1m-2025-08-07");
-  }
+  // Structured-output requests carry `output_config.format`, which needs the
+  // structured-outputs beta on top of the CLI base set.
+  if (isStructuredOutput) parts.push(STRUCTURED_OUTPUTS_BETA);
 
   return filterExcluded(parts, excluded).join(",");
 }
@@ -126,38 +85,41 @@ function filterExcluded(parts: string[], excluded?: Set<string>): string[] {
   return parts.filter((b) => !excluded.has(b));
 }
 
+/**
+ * `x-stainless-*` headers the Anthropic TypeScript SDK attaches, which the
+ * real Claude CLI therefore sends. Restored for fingerprint parity in
+ * upstream PR #207.
+ */
+function getStainlessHeaders(): Record<string, string> {
+  return {
+    "x-stainless-arch": process.arch,
+    "x-stainless-lang": "js",
+    "x-stainless-os": process.platform === "darwin" ? "MacOS" : process.platform === "linux" ? "Linux" : process.platform,
+    "x-stainless-package-version": "0.81.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": process.version,
+    "x-stainless-timeout": "600",
+  };
+}
+
 export function buildHeaders(
   model: string,
   isStructuredOutput = false,
   excluded?: Set<string>,
+  accessToken: string = getCredentials().accessToken,
 ): Record<string, string> {
-  // Header set aligned with the `opencode-claude-auth` plugin.
-  //
-  // REMOVED (previously present, but the plugin does not send them and
-  // our thinking-plaintext investigation pointed to these as the most
-  // likely reason Anthropic redacts thinking for our traffic):
-  //   - `anthropic-dangerous-direct-browser-access: true` — signals to
-  //     Anthropic that the client is a browser-style consumer; appears
-  //     to trigger safety redactions, including thinking_delta being
-  //     stripped from the stream.
-  //   - All `x-stainless-*` headers — the plugin never sets them;
-  //     they suggest "requests coming from the Anthropic SDK" which
-  //     may also factor into redaction policy.
-  //   - `content-type: application/json` — the fetch polyfill sets it
-  //     automatically when the body is a JSON string, so we don't need
-  //     to duplicate it. (If it becomes necessary we can re-add, but
-  //     the plugin omits it and works.)
   return {
-    authorization: `Bearer ${getCredentials().accessToken}`,
+    authorization: `Bearer ${accessToken}`,
     "anthropic-version": "2023-06-01",
     "anthropic-beta": buildBetas(model, isStructuredOutput, excluded),
+    "anthropic-dangerous-direct-browser-access": "true",
     "x-app": "cli",
-    // Entrypoint label changed from `cli` to `sdk-cli` in Claude Code
-    // 2.1.112 (opencode-claude-auth PR #207). Anthropic correlates the
-    // user-agent string with the request fingerprint; staying on the old
-    // label after a CLI version bump risks triggering safety policies.
+    // `sdk-cli` entrypoint since Claude Code 2.1.112 (upstream PR #207); must
+    // match `cc_entrypoint` in the billing header.
     "user-agent": `claude-cli/${VERSION} (external, sdk-cli)`,
     "x-client-request-id": crypto.randomUUID(),
     "X-Claude-Code-Session-Id": SESSION_ID,
+    ...getStainlessHeaders(),
   };
 }

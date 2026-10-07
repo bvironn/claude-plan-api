@@ -103,15 +103,15 @@ describe("beta-exclusion — REQ-5: per-model independence", () => {
 describe("headers — REQ-7: buildBetas respects excluded set", () => {
   test("REQ-7 omits excluded beta, retains others", () => {
     const before = buildBetas("claude-opus-4-6", false);
-    expect(before.split(",")).toContain("context-1m-2025-08-07");
+    expect(before.split(",")).toContain("interleaved-thinking-2025-05-14");
 
     const after = buildBetas(
       "claude-opus-4-6",
       false,
-      new Set(["context-1m-2025-08-07"])
+      new Set(["interleaved-thinking-2025-05-14"])
     );
     const parts = after.split(",");
-    expect(parts).not.toContain("context-1m-2025-08-07");
+    expect(parts).not.toContain("interleaved-thinking-2025-05-14");
     expect(parts).toContain("oauth-2025-04-20");
   });
 
@@ -122,25 +122,67 @@ describe("headers — REQ-7: buildBetas respects excluded set", () => {
   });
 });
 
-describe("headers — REQ-7 invariant: buildBetas always contains a structured-outputs beta", () => {
+describe("headers — structured-outputs beta", () => {
   test("structured-output path (isStructuredOutput:true) includes a structured-outputs- beta", () => {
     const betas = buildBetas("claude-sonnet-4-6", true);
     const parts = betas.split(",");
     expect(parts.some((b) => /structured-outputs-/.test(b))).toBe(true);
   });
 
-  test("chat path (isStructuredOutput:false) includes a structured-outputs- beta", () => {
+  test("chat path matches the Claude CLI and sends no structured-outputs beta", () => {
     const betas = buildBetas("claude-sonnet-4-6", false);
     const parts = betas.split(",");
-    expect(parts.some((b) => /structured-outputs-/.test(b))).toBe(true);
+    expect(parts.some((b) => /structured-outputs-/.test(b))).toBe(false);
+  });
+});
+
+// Pinned from opencode-claude-auth v2.2.1 (Claude CLI 2.1.257 intercept).
+describe("headers — Claude CLI 2.1.257 beta parity", () => {
+  const BASE = [
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+    "interleaved-thinking-2025-05-14",
+    "prompt-caching-scope-2026-01-05",
+    "context-management-2025-06-27",
+    "advisor-tool-2026-03-01",
+    "thinking-token-count-2026-05-13",
+    "extended-cache-ttl-2025-04-11",
+  ];
+
+  test.each([
+    ["claude-opus-4-7", [...BASE, "effort-2025-11-24"]],
+    ["claude-opus-4-6", [...BASE, "effort-2025-11-24"]],
+    ["claude-sonnet-4-6", [...BASE, "effort-2025-11-24"]],
+    ["claude-opus-4-5-20251101", [...BASE, "effort-2025-11-24"]],
+    ["claude-sonnet-4-5-20250929", BASE],
+    ["claude-haiku-4-5-20251001", BASE],
+    ["claude-opus-4-8", BASE],
+    ["claude-opus-5-5", BASE],
+    ["claude-fable-5-1", BASE],
+  ])("%s", (model, expected) => {
+    expect(buildBetas(model as string, false).split(",")).toEqual(expected as string[]);
+  });
+
+  test("context-1m is never sent", () => {
+    for (const m of ["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-5-5"]) {
+      expect(buildBetas(m, false)).not.toContain("context-1m");
+    }
+  });
+
+  test("buildHeaders carries the SDK fingerprint headers", () => {
+    const headers = buildHeaders("claude-opus-5-5");
+    expect(headers["anthropic-dangerous-direct-browser-access"]).toBe("true");
+    expect(headers["x-stainless-lang"]).toBe("js");
+    expect(headers["x-stainless-package-version"]).toBe("0.81.0");
+    expect(headers["user-agent"]).toMatch(/^claude-cli\/[\d.]+ \(external, sdk-cli\)$/);
   });
 });
 
 describe("headers — REQ-8: buildHeaders threads excluded through", () => {
   test("REQ-8 anthropic-beta header omits excluded beta", () => {
-    const headers = buildHeaders("claude-opus-4-6", false, new Set(["context-1m-2025-08-07"]));
+    const headers = buildHeaders("claude-opus-4-6", false, new Set(["interleaved-thinking-2025-05-14"]));
     const beta = headers["anthropic-beta"]!;
-    expect(beta.split(",")).not.toContain("context-1m-2025-08-07");
+    expect(beta.split(",")).not.toContain("interleaved-thinking-2025-05-14");
   });
 });
 
@@ -167,10 +209,10 @@ describe("callAnthropic — retry + telemetry", () => {
       expect(res.status).toBe(200);
       expect(callCount).toBe(2);
       // First request had the beta; retry omitted it.
-      expect(seenBetaHeaders[0]!.split(",")).toContain("context-1m-2025-08-07");
-      expect(seenBetaHeaders[1]!.split(",")).not.toContain("context-1m-2025-08-07");
+      expect(seenBetaHeaders[0]!.split(",")).toContain("interleaved-thinking-2025-05-14");
+      expect(seenBetaHeaders[1]!.split(",")).not.toContain("interleaved-thinking-2025-05-14");
       // State recorded
-      expect(getExcludedBetas("claude-opus-4-6").has("context-1m-2025-08-07")).toBe(true);
+      expect(getExcludedBetas("claude-opus-4-6").has("interleaved-thinking-2025-05-14")).toBe(true);
     } finally {
       fetchSpy.mockRestore();
     }
@@ -218,7 +260,7 @@ describe("callAnthropic — retry + telemetry", () => {
       expect(event).toBe("upstream.beta_excluded");
       expect(payload).toMatchObject({
         model: "claude-opus-4-6",
-        beta: "context-1m-2025-08-07",
+        beta: "interleaved-thinking-2025-05-14",
         attempt: 1,
         reason: "long_context",
       });

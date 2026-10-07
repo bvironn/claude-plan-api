@@ -2,10 +2,12 @@
 // by upstream. Mirrors the proven pattern from `opencode-claude-auth/src/betas.ts`,
 // adapted for claude-plan-api (no env-var / model-config coupling).
 //
-// All long-context beta flags we know how to drop, in the order we try to
-// drop them when upstream signals a long-context rejection.
+// Betas we drop, in order, when upstream signals a long-context rejection.
+// Mirrors opencode-claude-auth's `longContextBetas` minus
+// `context-1m-2025-08-07`, which is never sent since upstream v2.0.0 (#240)
+// — excluding a beta that isn't on the wire would only burn a retry.
 export const LONG_CONTEXT_BETAS: readonly string[] = [
-  "context-1m-2025-08-07",
+  "interleaved-thinking-2025-05-14",
 ] as const;
 
 // Module-private state. Keyed per model id; each value is a live Set that
@@ -16,10 +18,9 @@ export function isLongContextError(responseBody: string): boolean {
   return (
     responseBody.includes("Extra usage is required for long context requests") ||
     responseBody.includes("long context beta is not yet available") ||
-    // Max-subscription quota exhausted for 1M-context requests. Upstream
-    // returns this on cap reached; treat as long-context error so the retry
-    // loop drops `context-1m-2025-08-07` and falls back to 200k context.
-    // Mirrors opencode-claude-auth#211.
+    // Max-subscription quota exhausted for long-context requests. Treated as
+    // a long-context error so the retry loop drops a beta before surfacing
+    // it. Mirrors opencode-claude-auth#211.
     responseBody.includes("You're out of extra usage")
   );
 }
