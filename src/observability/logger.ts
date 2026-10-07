@@ -95,13 +95,45 @@ export interface EmitOverrides {
   timestamp?: string;
 }
 
+const SECRET_KEYS = new Set([
+  "accessToken",
+  "refreshToken",
+  "access_token",
+  "refresh_token",
+  "authorization",
+  "x-api-key",
+  "apiKey",
+  "api_key",
+]);
+// OAuth tokens (`sk-ant-oat01-…` / `sk-ant-ort01-…`), API keys, and JWTs.
+const SECRET_VALUE_PATTERN = /^(sk-ant-[a-z0-9]+-|eyJ[A-Za-z0-9_-]{10,})/;
+
+/**
+ * Shallow defence-in-depth redaction of a log payload: secret-named keys and
+ * token-shaped string values never reach pino or the telemetry store, even
+ * if a future call site logs them by mistake. Ported from the upstream
+ * plugin's logger. Returns the same object when nothing matched.
+ */
+export function redact(payload: Record<string, unknown>): Record<string, unknown> {
+  let out: Record<string, unknown> | null = null;
+  for (const [key, value] of Object.entries(payload)) {
+    if (typeof value !== "string") continue;
+    if (SECRET_KEYS.has(key) || SECRET_VALUE_PATTERN.test(value)) {
+      out ??= { ...payload };
+      out[key] = "REDACTED";
+    }
+  }
+  return out ?? payload;
+}
+
 export function emit(
   level: LogLevel,
   event: string,
-  payload: Record<string, unknown> = {},
+  rawPayload: Record<string, unknown> = {},
   stream?: LogStream,
   overrides?: EmitOverrides
 ): void {
+  const payload = redact(rawPayload);
   const trace = currentTrace();
   const timestamp = overrides?.timestamp ?? new Date().toISOString();
 
