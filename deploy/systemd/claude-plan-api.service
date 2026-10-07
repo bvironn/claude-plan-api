@@ -1,0 +1,21 @@
+[Unit]
+Description=claude-plan-api (OpenAI-compatible gateway)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/claude-plan-api
+EnvironmentFile=/etc/claude-plan-api/env
+ExecStart=/root/.bun/bin/bun src/index.ts
+StateDirectory=claude-plan-api
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=3
+# Graceful shutdown drains in-flight requests for up to 5s (src/index.ts).
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
