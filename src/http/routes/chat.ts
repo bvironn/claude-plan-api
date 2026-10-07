@@ -62,7 +62,7 @@ export async function handleChat(req: Request): Promise<Response> {
     }, { status: 400 });
   }
 
-  await ensureValidToken();
+  await ensureValidToken({ wait: true, signal: req.signal });
   await ensureAccountUuid();
 
   let anthropicBody: Record<string, unknown>;
@@ -104,7 +104,7 @@ export async function handleChat(req: Request): Promise<Response> {
     });
   }
 
-  const res = await callAnthropic(anthropicBody, { model, isStream, isStructuredOutput });
+  const res = await callAnthropic(anthropicBody, { model, isStream, isStructuredOutput, signal: req.signal });
 
   if (!res.ok) {
     return res;

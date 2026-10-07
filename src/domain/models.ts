@@ -71,6 +71,23 @@ function makeFallback(partial: Pick<UpstreamModel, "id" | "displayName" | "adapt
 }
 
 const FALLBACK_MODELS: readonly UpstreamModel[] = [
+  // Newest-first, mirroring the order Anthropic's /v1/models returns, so the
+  // family-alias resolver picks the freshest model while on fallback data.
+  // Ids from the reference plugin's validated model list (v2.2.1).
+  makeFallback({ id: "claude-opus-5-5", displayName: "Claude Opus 5.5",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-fable-5-1", displayName: "Claude Fable 5.1",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-sonnet-5", displayName: "Claude Sonnet 5",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-opus-5", displayName: "Claude Opus 5",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-fable-5", displayName: "Claude Fable 5",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-opus-4-8", displayName: "Claude Opus 4.8",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
+  makeFallback({ id: "claude-opus-4-7", displayName: "Claude Opus 4.7",
+    adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
   makeFallback({ id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6",
     adaptiveThinking: true, contextManagement: true, outputEffort: true, structuredOutputs: true }),
   makeFallback({ id: "claude-opus-4-6", displayName: "Claude Opus 4.6",
@@ -375,16 +392,21 @@ export function resolveModel(input: string): string {
 }
 
 /**
- * Given a family token (sonnet / opus / haiku) return the freshest id in
+ * Given a family token (sonnet / opus / haiku / fable) return the freshest id in
  * that family from the catalog. "Freshest" = earliest in the catalog order
  * (Anthropic returns newest-first) or, if no ordering info, the id without
  * a date suffix.
  */
 function resolveFamilyAlias(input: string, catalog: readonly UpstreamModel[]): string | null {
   const token = input.toLowerCase();
-  if (!["sonnet", "opus", "haiku"].includes(token)) return null;
+  if (!["sonnet", "opus", "haiku", "fable"].includes(token)) return null;
 
-  const family = catalog.filter((m) => m.id.toLowerCase().includes(token));
+  // `-fast` variants are separate SKUs (some fail on OAuth plans), never the
+  // default answer to a bare family alias.
+  const family = catalog.filter((m) => {
+    const id = m.id.toLowerCase();
+    return id.includes(token) && !id.endsWith("-fast");
+  });
   if (family.length === 0) return null;
 
   // Prefer ids without a date suffix (e.g. "claude-sonnet-4-6" over "...-20250929").
@@ -396,9 +418,10 @@ function resolveFamilyAlias(input: string, catalog: readonly UpstreamModel[]): s
 // some caller asks for an exact id that used to exist. New aliases should
 // not be added here — extend resolveFamilyAlias instead.
 const STATIC_ALIASES: Readonly<Record<string, string>> = {
-  sonnet: "claude-sonnet-4-6",
-  opus: "claude-opus-4-6",
+  sonnet: "claude-sonnet-5",
+  opus: "claude-opus-5-5",
   haiku: "claude-haiku-4-5-20251001",
+  fable: "claude-fable-5-1",
 };
 
 // --- Test-only surface -----------------------------------------------------

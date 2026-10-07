@@ -8,6 +8,8 @@ Operational scripts for `claude-plan-api`.
 | `create-api-key.ts` | Issue a new API key (stores only the digest). Resolves the DB via `TELEMETRY_DB_PATH`. |
 | `purge-telemetry.ts` | Hot-purge the telemetry store while the API keeps running (WAL-safe). Resolves the DB via `TELEMETRY_DB_PATH`. |
 | `bare-thinking-test.ts` | Ad-hoc upstream "thinking" probe. |
+| `intercept-cli.ts` | Capture what the installed `claude` CLI sends (version, betas, headers, body shape) via a local fake API and diff it against this gateway. No quota used. Run after a CLI update to see whether `VERSION` or the beta set must follow. |
+| `test-models.ts` | Live smoke test: one tiny streamed request per model through the real pipeline; reports pass/fail and whether thinking arrives plaintext or redacted. Uses a few tokens per model — run it with the prod env loaded (see below) after changing the version, betas or headers. |
 
 ## ⚠️ Which database do the scripts write to?
 

@@ -1,5 +1,5 @@
 import { ANTHROPIC_API, MAX_RETRIES, MAX_RETRY_AFTER_MS } from "../config.ts";
-import { refreshToken } from "../domain/credentials.ts";
+import { forceRefresh, getCredentials, reloadCredentialsFromSource } from "../domain/credentials.ts";
 import { buildHeaders } from "./headers.ts";
 import {
   LONG_CONTEXT_BETAS,
@@ -8,54 +8,99 @@ import {
   addExcludedBeta,
   getNextBetaToExclude,
 } from "./beta-exclusion.ts";
+import { sleepUnlessAborted } from "./fetch-retry.ts";
 import { emit } from "../observability/logger.ts";
 import { withSpan } from "../observability/tracer.ts";
 
+/**
+ * Bound on 401 recovery rounds. Most cases resolve on the first: a re-read
+ * picks up a token rotated externally, or a forced refresh replaces the
+ * rejected one. The second covers a store rotated again mid-recovery.
+ */
+const MAX_AUTH_RECOVERY_ATTEMPTS = 2;
+
+/**
+ * Produce a token to retry with after `rejected` got a 401: first one rotated
+ * by someone else (the `claude` CLI, another gateway process), else a forced
+ * OAuth refresh. Returns null when nothing new is available. Never throws —
+ * a failed recovery degrades to returning the original 401.
+ */
+async function recoverRejectedToken(rejected: string, model: string, attempt: number): Promise<string | null> {
+  let candidate = reloadCredentialsFromSource()?.accessToken ?? null;
+  if (!candidate || candidate === rejected) {
+    try {
+      candidate = (await forceRefresh())?.accessToken ?? null;
+    } catch (err) {
+      emit("warn", "upstream.auth_recovery.refresh_threw", { model, attempt, error: String(err) });
+      candidate = null;
+    }
+  }
+  if (!candidate || candidate === rejected) {
+    emit("warn", "upstream.auth_recovery.exhausted", { model, attempt });
+    return null;
+  }
+  emit("warn", "upstream.auth_recovery.retry", { model, attempt });
+  return candidate;
+}
+
 export async function callAnthropic(
   anthropicBody: Record<string, unknown>,
-  options: { model: string; isStream: boolean; isStructuredOutput?: boolean }
+  options: {
+    model: string;
+    isStream: boolean;
+    isStructuredOutput?: boolean;
+    /**
+     * Client abort signal. Only cuts short a retry backoff; it is NOT passed
+     * to the upstream fetch, whose lifetime the streaming layer manages.
+     */
+    signal?: AbortSignal;
+  }
 ): Promise<Response> {
-  const { model, isStructuredOutput = false } = options;
+  const { model, isStructuredOutput = false, signal } = options;
   let excluded = getExcludedBetas(model);
-  let headers = buildHeaders(model, isStructuredOutput, excluded);
+  let token = getCredentials().accessToken;
+  const payload = JSON.stringify(anthropicBody);
 
   return withSpan("upstream.anthropic.call", async () => {
     let betaExclusionAttempts = 0;
+    let authRecoveryAttempts = 0;
+    let rateLimitRetries = 0;
+    let rotationChecked = false;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // Every `continue` consumes a bounded budget, so the loop terminates.
+    for (let request = 0; ; request++) {
       const res = await fetch(ANTHROPIC_API, {
         method: "POST",
-        headers,
-        body: JSON.stringify(anthropicBody),
+        headers: buildHeaders(model, isStructuredOutput, excluded, token),
+        body: payload,
       });
 
       if (res.ok) {
         emit("info", "upstream.anthropic.response", {
           status: res.status,
           model,
-          attempt,
+          attempt: request,
           contentType: res.headers.get("content-type"),
         });
         return res;
       }
 
-      // Read body via clone so the original Response stays readable if we
-      // need to surface it later without re-fetching.
-      const clonedForBody = res.clone();
-      const errorBody = await clonedForBody.text();
+      // Read body via clone so the original Response stays readable.
+      const errorBody = await res.clone().text();
 
-      if (res.status === 401 && attempt === 0) {
-        emit("warn", "upstream.anthropic.401", { attempt, model });
-        await refreshToken();
-        const newCreds = (await import("../domain/credentials.ts")).getCredentials();
-        headers["authorization"] = `Bearer ${newCreds.accessToken}`;
-        continue;
+      // Token rejected: adopt an externally rotated token or force a refresh.
+      if (res.status === 401 && authRecoveryAttempts < MAX_AUTH_RECOVERY_ATTEMPTS) {
+        authRecoveryAttempts++;
+        emit("warn", "upstream.anthropic.401", { attempt: authRecoveryAttempts, model });
+        const next = await recoverRejectedToken(token, model, authRecoveryAttempts);
+        if (next) {
+          token = next;
+          continue;
+        }
       }
 
-      // Beta-exclusion retry: fires on 400 or 429 bodies that match the
-      // long-context signature. Bounded by LONG_CONTEXT_BETAS.length and
-      // placed BEFORE the generic 429/529 backoff so a long-context 429
-      // drops a beta instead of burning backoff budget.
+      // Beta-exclusion retry: 400/429 bodies matching the long-context
+      // signature drop a beta instead of burning backoff budget.
       if (
         (res.status === 400 || res.status === 429) &&
         betaExclusionAttempts < LONG_CONTEXT_BETAS.length &&
@@ -72,22 +117,32 @@ export async function callAnthropic(
             reason: "long_context",
           });
           excluded = getExcludedBetas(model);
-          headers = buildHeaders(model, isStructuredOutput, excluded);
           continue;
         }
-        // next === null: fall through to normal handling below.
       }
 
-      if ((res.status === 429 || res.status === 529) && attempt < MAX_RETRIES) {
-        const wait = parseInt(res.headers.get("retry-after") || "") || 2 ** attempt;
+      // A rate limit already resolved elsewhere (an account switch, or the
+      // CLI storing a fresh token) shows up as a changed token in the store.
+      // Checked once; costs one file read when nothing changed.
+      if (res.status === 429 && !rotationChecked) {
+        rotationChecked = true;
+        const rotated = reloadCredentialsFromSource();
+        if (rotated && rotated.accessToken !== token) {
+          emit("warn", "upstream.rate_limit.token_changed", { model });
+          token = rotated.accessToken;
+          continue;
+        }
+      }
+
+      if ((res.status === 429 || res.status === 529) && rateLimitRetries < MAX_RETRIES) {
+        const wait = parseInt(res.headers.get("retry-after") || "") || 2 ** rateLimitRetries;
         const waitMs = wait * 1000;
         // Quota-reset retries are hour-scale; surface the response immediately
         // rather than blocking the proxy on a delay the caller can't observe.
-        // Mirrors opencode-claude-auth#211.
         if (waitMs > MAX_RETRY_AFTER_MS) {
           emit("warn", "upstream.retry.cap_exceeded", {
             status: res.status,
-            attempt,
+            attempt: rateLimitRetries,
             retryAfter: wait,
             capMs: MAX_RETRY_AFTER_MS,
             model,
@@ -96,24 +151,23 @@ export async function callAnthropic(
         }
         emit("warn", "upstream.retry", {
           status: res.status,
-          attempt,
+          attempt: rateLimitRetries,
           retryAfter: wait,
           model,
         });
-        await Bun.sleep(waitMs);
-        continue;
+        rateLimitRetries++;
+        await sleepUnlessAborted(waitMs, signal);
+        if (!signal?.aborted) continue;
+        emit("warn", "upstream.retry.aborted", { status: res.status, model });
       }
 
       emit("error", "upstream.anthropic.error", {
         status: res.status,
-        attempt,
+        attempt: request,
         model,
         errorBody: errorBody.slice(0, 500),
       });
       return Response.json({ error: { message: errorBody, type: "error", code: res.status } }, { status: res.status });
     }
-
-    emit("error", "upstream.anthropic.maxRetries", { model, maxRetries: MAX_RETRIES });
-    return Response.json({ error: { message: "Max retries exceeded", type: "error", code: 502 } }, { status: 502 });
   }, { model });
 }

@@ -9,7 +9,7 @@ import {
 import { buildUserMetadata } from "../domain/account.ts";
 import { computeBilling } from "../upstream/billing.ts";
 import { emit } from "../observability/logger.ts";
-import { repairToolPairs } from "./repair-tool-pairs.ts";
+import { applyToolRepair } from "./repair-tool-pairs.ts";
 import { isClaudeCodeIdentityEnabled } from "../config.ts";
 
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -642,10 +642,10 @@ export function openaiToAnthropic(body: Record<string, unknown>): TransformResul
     }
   }
 
-  // S7 pipeline: repair → strip client cache_control → budget-aware breakpoint planner.
+  // S7 pipeline: tool-pair repair (TOOL_REPAIR_MODE) → strip client cache_control → budget-aware breakpoint planner.
   // Breakpoints must land on post-repair blocks (pre-repair orphans get removed),
   // and client-supplied markers must be cleared so the planner is the sole authority.
-  const repaired = repairToolPairs(messages);
+  const repaired = applyToolRepair(messages);
   stripClientCacheControl(repaired);
   const hasTools = !!(body.tools && (body.tools as unknown[]).length > 0);
   const budget = 4 - (includeIdentity ? 1 : 0) - (hasTools ? 1 : 0);

@@ -1,6 +1,12 @@
 import { describe, test, expect, spyOn, afterEach } from "bun:test";
 import type { AnthropicMessage } from "../src/types.ts";
-import { repairToolPairs } from "../src/transform/repair-tool-pairs.ts";
+import {
+  repairToolPairs,
+  synthesizeMissingToolResults,
+  applyToolRepair,
+  resolveToolRepairMode,
+  TOOL_RESULT_PLACEHOLDER,
+} from "../src/transform/repair-tool-pairs.ts";
 import * as logger from "../src/observability/logger.ts";
 import { openaiToAnthropic } from "../src/transform/openai-to-anthropic.ts";
 
@@ -198,56 +204,212 @@ describe("repairToolPairs", () => {
     }
   });
 
-  // --- REQ-9: Post-translation integration ---
-  test("REQ-9: openaiToAnthropic output has no orphan tool_use/tool_result blocks", () => {
-    // Malformed OpenAI body: assistant issued a tool_call but no matching `tool` role response.
-    const body: Record<string, unknown> = {
-      model: "sonnet",
-      messages: [
-        { role: "user", content: "please search" },
-        {
-          role: "assistant",
-          content: "working on it",
-          tool_calls: [
-            {
-              id: "toolu_orphan_call",
-              type: "function",
-              function: { name: "search", arguments: JSON.stringify({ q: "hi" }) },
-            },
-          ],
-        },
-        { role: "user", content: "follow up" },
-      ],
-    };
-
-    const { body: result } = openaiToAnthropic(body);
-    const messages = result.messages as AnthropicMessage[];
-
-    // Walk every message: no tool_use with id="toolu_orphan_call" should survive.
-    let foundOrphan = false;
-    for (const m of messages) {
-      if (!Array.isArray(m.content)) continue;
-      for (const block of m.content as Array<Record<string, unknown>>) {
-        if (block.type === "tool_use" && block.id === "toolu_orphan_call") {
-          foundOrphan = true;
-        }
-        if (block.type === "tool_result") {
-          // Any surviving tool_result must have a matching tool_use in a prior message.
-          // Since the translator produced no matching tool_use, any tool_result here is also orphaned.
-          foundOrphan = true;
+  // --- REQ-9: Post-translation integration (drop mode) ---
+  test("REQ-9: openaiToAnthropic in drop mode leaves no orphan tool_use/tool_result blocks", () => {
+    const prev = Bun.env.TOOL_REPAIR_MODE;
+    Bun.env.TOOL_REPAIR_MODE = "drop";
+    try {
+      const { body: result } = openaiToAnthropic(orphanCallBody());
+      const messages = result.messages as AnthropicMessage[];
+      for (const m of messages) {
+        if (!Array.isArray(m.content)) continue;
+        for (const block of m.content as Array<Record<string, unknown>>) {
+          expect(block.type === "tool_use" || block.type === "tool_result").toBe(false);
         }
       }
+      expect(userTexts(messages)).toContain("please search");
+      expect(userTexts(messages)).toContain("follow up");
+    } finally {
+      if (prev === undefined) delete Bun.env.TOOL_REPAIR_MODE;
+      else Bun.env.TOOL_REPAIR_MODE = prev;
     }
-    expect(foundOrphan).toBe(false);
+  });
 
-    // Sanity: the user messages ("please search", "follow up") must still be present —
-    // repair should only have pruned the orphan tool_use block and any now-empty msg.
-    const userTexts = messages
-      .filter((m) => m.role === "user")
-      .map((m) => (typeof m.content === "string"
-        ? m.content
-        : (m.content as Array<Record<string, unknown>>).find((b) => b.type === "text")?.text));
-    expect(userTexts).toContain("please search");
-    expect(userTexts).toContain("follow up");
+  // --- Adjacency (upstream #250) ---
+  test("drops a tool_use whose result exists but is not in the next message", () => {
+    const messages: AnthropicMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "X", input: {} }] },
+      { role: "user", content: [{ type: "text", text: "interrupting" }] },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "late" }] },
+    ];
+    const result = repairToolPairs(messages);
+    const blocks = result.flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+    expect(blocks.some((b) => b.type === "tool_use")).toBe(false);
+    expect(blocks.some((b) => b.type === "tool_result")).toBe(false);
+  });
+
+  test("a replayed tool_use id is judged per occurrence", () => {
+    const messages: AnthropicMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "dup", name: "X", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "dup", content: "r" }] },
+      { role: "assistant", content: [{ type: "text", text: "again" }, { type: "tool_use", id: "dup", name: "X", input: {} }] },
+      { role: "user", content: "no result here" },
+    ];
+    const result = repairToolPairs(messages);
+    expect(result[1]!.content).toEqual(messages[1]!.content);
+    expect(result[2]!.content).toEqual([{ type: "text", text: "again" }]);
+  });
+
+  test("drop mode omits a thinking turn whole instead of rewriting it, then cascades", () => {
+    const messages: AnthropicMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "hmm", signature: "sig" },
+          { type: "tool_use", id: "ok", name: "X", input: {} },
+          { type: "tool_use", id: "orphan", name: "Y", input: {} },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "ok", content: "r" }] },
+      { role: "user", content: "next" },
+    ];
+    const result = repairToolPairs(messages);
+    expect(result).toEqual([
+      { role: "user", content: "go" },
+      { role: "user", content: "next" },
+    ]);
+  });
+});
+
+function orphanCallBody(): Record<string, unknown> {
+  return {
+    model: "sonnet",
+    messages: [
+      { role: "user", content: "please search" },
+      {
+        role: "assistant",
+        content: "working on it",
+        tool_calls: [
+          {
+            id: "toolu_orphan_call",
+            type: "function",
+            function: { name: "search", arguments: JSON.stringify({ q: "hi" }) },
+          },
+        ],
+      },
+      { role: "user", content: "follow up" },
+    ],
+  };
+}
+
+function userTexts(messages: AnthropicMessage[]): unknown[] {
+  return messages
+    .filter((m) => m.role === "user")
+    .map((m) => (typeof m.content === "string"
+      ? m.content
+      : (m.content as Array<Record<string, unknown>>).find((b) => b.type === "text")?.text));
+}
+
+/** Every tool_use is answered in the next message and every tool_result answers the previous one. */
+function expectAdjacentPairs(messages: AnthropicMessage[]): void {
+  messages.forEach((m, i) => {
+    if (!Array.isArray(m.content)) return;
+    for (const b of m.content) {
+      if (b.type === "tool_use") {
+        const next = messages[i + 1];
+        expect(Array.isArray(next?.content) && (next!.content as Array<Record<string, unknown>>).some((r) => r.tool_use_id === b.id)).toBe(true);
+      }
+      if (b.type === "tool_result") {
+        const prev = messages[i - 1];
+        expect(Array.isArray(prev?.content) && (prev!.content as Array<Record<string, unknown>>).some((u) => u.id === b.tool_use_id)).toBe(true);
+      }
+    }
+  });
+}
+
+describe("synthesizeMissingToolResults (placeholder mode, default)", () => {
+  test("mode defaults to placeholder; TOOL_REPAIR_MODE=drop opts out", () => {
+    expect(resolveToolRepairMode({})).toBe("placeholder");
+    expect(resolveToolRepairMode({ TOOL_REPAIR_MODE: "garbage" })).toBe("placeholder");
+    expect(resolveToolRepairMode({ TOOL_REPAIR_MODE: " DROP " })).toBe("drop");
+  });
+
+  test("returns the same reference when pairs are already adjacent", () => {
+    const messages: AnthropicMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "a", name: "X", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: "r" }] },
+    ];
+    expect(synthesizeMissingToolResults(messages)).toBe(messages);
+  });
+
+  test("keeps the orphan tool_use and merges a placeholder into a plain-text user turn", () => {
+    const assistant: AnthropicMessage = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "plan", signature: "sig" },
+        { type: "text", text: "searching" },
+        { type: "tool_use", id: "t1", name: "Search", input: {} },
+      ],
+    };
+    const result = synthesizeMissingToolResults([
+      { role: "user", content: "go" },
+      assistant,
+      { role: "user", content: "follow up" },
+    ]);
+    expect(result).toHaveLength(3);
+    // Assistant turn (with thinking) is untouched — same object.
+    expect(result[1]).toBe(assistant);
+    expect(result[2]!.content).toEqual([
+      { type: "tool_result", tool_use_id: "t1", content: TOOL_RESULT_PLACEHOLDER, is_error: true },
+      { type: "text", text: "follow up" },
+    ]);
+    expectAdjacentPairs(result);
+  });
+
+  test("synthesizes only the missing ids and puts them ahead of existing blocks", () => {
+    const result = synthesizeMissingToolResults([
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "a", name: "X", input: {} },
+          { type: "tool_use", id: "b", name: "Y", input: {} },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: "real" }] },
+    ]);
+    const blocks = result[1]!.content as Array<Record<string, unknown>>;
+    expect(blocks.map((b) => b.tool_use_id)).toEqual(["b", "a"]);
+    expect(blocks[1]!.content).toBe("real");
+    expectAdjacentPairs(result);
+  });
+
+  test("appends a user turn when the tool_use is last or followed by an assistant", () => {
+    const result = synthesizeMissingToolResults([
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "tool_use", id: "x", name: "X", input: {} }] },
+    ]);
+    expect(result).toHaveLength(3);
+    expect(result[2]!.role).toBe("user");
+    expectAdjacentPairs(result);
+  });
+
+  test("removes non-adjacent tool_results, then answers the stranded tool_use", () => {
+    const result = synthesizeMissingToolResults([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "X", input: {} }] },
+      { role: "user", content: [{ type: "text", text: "interrupting" }] },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "late" }] },
+    ]);
+    expect(result).toHaveLength(3);
+    expectAdjacentPairs(result);
+  });
+
+  test("applyToolRepair dispatches on mode", () => {
+    const messages: AnthropicMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "x", name: "X", input: {} }] },
+    ];
+    expect(applyToolRepair(messages, "drop")).toEqual([]);
+    expect(applyToolRepair(messages, "placeholder")).toHaveLength(2);
+  });
+
+  test("openaiToAnthropic (default mode) keeps the call and pairs it with a placeholder", () => {
+    const { body } = openaiToAnthropic(orphanCallBody());
+    const messages = body.messages as AnthropicMessage[];
+    const blocks = messages.flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+    expect(blocks.some((b) => b.type === "tool_use" && b.id === "toolu_orphan_call")).toBe(true);
+    expectAdjacentPairs(messages);
+    expect(userTexts(messages).some((t) => typeof t === "string" && t.includes("follow up"))).toBe(true);
   });
 });

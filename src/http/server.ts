@@ -18,6 +18,7 @@ import { handleKeysList, handleKeysCreate, handleKeysRevoke, handleKeysRename, h
 import { serveStatic, serveSpaFallback } from "./static.ts";
 import { withObservability } from "../observability/middleware.ts";
 import { emit } from "../observability/logger.ts";
+import { CredentialsUnavailableError } from "../domain/credentials.ts";
 import { enforceApiKey } from "../guards/api-key.ts";
 import { maybeCompress } from "./compression.ts";
 
@@ -77,6 +78,7 @@ export async function handleRequest(req: Request): Promise<Response> {
     const res = await dispatch(req, method, pathname);
     return await maybeCompress(req, res);
   } catch (err) {
+    if (err instanceof CredentialsUnavailableError) return err.toResponse();
     emit("error", "http.unhandled", {
       method,
       path: pathname,
