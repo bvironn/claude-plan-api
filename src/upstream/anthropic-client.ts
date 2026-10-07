@@ -43,6 +43,39 @@ async function recoverRejectedToken(rejected: string, model: string, attempt: nu
   return candidate;
 }
 
+/**
+ * 429 `error.details.error_code` values that are entitlement denials, not
+ * rate limits: the plan does not include the model (e.g. Fable on Pro
+ * returns `credits_required`). Waiting cannot fix them.
+ */
+const NON_RETRYABLE_429_CODES = new Set(["credits_required"]);
+
+/** The entitlement error code carried by a 429 body, or null for a real rate limit. */
+export function getEntitlementErrorCode(errorBody: string): string | null {
+  try {
+    const code = (JSON.parse(errorBody) as { error?: { details?: { error_code?: unknown } } })?.error?.details?.error_code;
+    return typeof code === "string" && NON_RETRYABLE_429_CODES.has(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Surface an entitlement denial as 403 rather than 429: OpenAI-compatible
+ * clients retry 429 automatically, which would loop on a request that can
+ * never succeed with this plan.
+ */
+function entitlementErrorResponse(errorBody: string, code: string): Response {
+  let message = "This model is not included in the current plan.";
+  try {
+    const m = (JSON.parse(errorBody) as { error?: { message?: unknown } })?.error?.message;
+    if (typeof m === "string" && m) message = m;
+  } catch {
+    // keep the default
+  }
+  return Response.json({ error: { message, type: "permission_error", code } }, { status: 403 });
+}
+
 export async function callAnthropic(
   anthropicBody: Record<string, unknown>,
   options: {
@@ -118,6 +151,15 @@ export async function callAnthropic(
           });
           excluded = getExcludedBetas(model);
           continue;
+        }
+      }
+
+      // Entitlement denial dressed as a 429: no backoff, no token rotation.
+      if (res.status === 429) {
+        const code = getEntitlementErrorCode(errorBody);
+        if (code) {
+          emit("warn", "upstream.anthropic.entitlement_denied", { model, code });
+          return entitlementErrorResponse(errorBody, code);
         }
       }
 

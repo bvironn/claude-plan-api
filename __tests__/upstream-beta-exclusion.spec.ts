@@ -351,3 +351,44 @@ describe("callAnthropic — retry + telemetry", () => {
     }
   });
 });
+
+describe("callAnthropic — entitlement 429 (credits_required)", () => {
+  const CREDITS_BODY = JSON.stringify({
+    type: "error",
+    error: {
+      type: "rate_limit_error",
+      message: "Usage credits are required for this model.",
+      details: { error_code: "credits_required", model: "claude-fable-5-1" },
+    },
+  });
+
+  test("returns 403 at once without retrying", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch");
+    let callCount = 0;
+    fetchSpy.mockImplementation((async () => {
+      callCount++;
+      return new Response(CREDITS_BODY, { status: 429, headers: { "retry-after": "1" } });
+    }) as unknown as typeof fetch);
+
+    try {
+      const res = await callAnthropic({ model: "claude-fable-5-1" }, { model: "claude-fable-5-1", isStream: false });
+      expect(callCount).toBe(1);
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: { message: string; type: string; code: string } };
+      expect(body.error).toEqual({
+        message: "Usage credits are required for this model.",
+        type: "permission_error",
+        code: "credits_required",
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("getEntitlementErrorCode ignores ordinary rate limits", async () => {
+    const { getEntitlementErrorCode } = await import("../src/upstream/anthropic-client.ts");
+    expect(getEntitlementErrorCode(CREDITS_BODY)).toBe("credits_required");
+    expect(getEntitlementErrorCode(JSON.stringify({ error: { type: "rate_limit_error", message: "slow down" } }))).toBeNull();
+    expect(getEntitlementErrorCode("rate limited")).toBeNull();
+  });
+});
